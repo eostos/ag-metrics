@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AG-Metrics — Plataforma de Auditoría AVC/SAT</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #080d1a; color: #e8edf5; -webkit-font-smoothing: antialiased; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #070c18; }
+    ::-webkit-scrollbar-thumb { background: #1c2b46; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #243358; }
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
+    select option { background: #0d1525; }
+    button:focus-visible { outline: 2px solid #4d7fe0; outline-offset: 2px; }
+    input:focus { border-color: #4d7fe0 !important; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+    // Limpiar caché de Babel standalone para forzar recompilación con el nuevo diseño
+    (function(){
+      var ver = "20260506b";
+      if (localStorage.getItem("agm_ver") !== ver) {
+        Object.keys(localStorage).forEach(function(k){
+          if (k.startsWith("babel-") || k.startsWith("__babel")) localStorage.removeItem(k);
+        });
+        localStorage.setItem("agm_ver", ver);
+      }
+    })();
+  </script>
+  <script type="text/babel" src="components/MockData.jsx?v=20260506b"></script>
+  <script type="text/babel" src="components/Auth.jsx?v=20260506b"></script>
+  <script type="text/babel" src="components/Layout.jsx?v=20260506b"></script>
+  <script type="text/babel" src="components/Dashboard.jsx?v=20260506b"></script>
+  <script type="text/babel" src="components/LaneDetail.jsx?v=20260506b"></script>
+  <script type="text/babel" src="components/Config.jsx?v=20260506b"></script>
+  <script type="text/babel" src="components/Reports.jsx?v=20260506b"></script>
+
+  <script type="text/babel">
+    // Global API client
+    window.API = {
+      token: () => localStorage.getItem("auditec_token") || "",
+      headers: () => ({ "Content-Type": "application/json", "Authorization": `Bearer ${window.API.token()}` }),
+      _handle: (r) => {
+        if (r.ok) return r.json();
+        // Adjuntar status al error para que el catch pueda distinguir 401/500
+        const err = Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
+        return Promise.reject(err);
+      },
+      get:  (url)       => fetch(url, { headers: window.API.headers() }).then(window.API._handle),
+      post: (url, body) => fetch(url, { method:"POST", headers: window.API.headers(), body: JSON.stringify(body) }).then(window.API._handle),
+      put:  (url, body) => fetch(url, { method:"PUT",  headers: window.API.headers(), body: JSON.stringify(body) }).then(window.API._handle),
+    };
+
+    const PAGE_TITLES = {
+      dashboard: { title: "Dashboard", subtitle: "Resumen de conciliación AVC/SAT por carril" },
+      reports:   { title: "Reportes",  subtitle: "Análisis de período y exportación" },
+      config:    { title: "Configuración", subtitle: "Integraciones, sistema y usuarios" },
+    };
+
+    function App() {
+      const [user, setUser]         = React.useState(null);
+      const [view, setView]         = React.useState("dashboard");
+      const [activeLane, setActiveLane] = React.useState(null);
+
+      React.useEffect(() => {
+        try {
+          const saved = localStorage.getItem("auditec_user");
+          if (saved) setUser(JSON.parse(saved));
+        } catch(e) {}
+      }, []);
+
+      function handleLogin(u) {
+        setUser(u);
+        localStorage.setItem("auditec_user", JSON.stringify(u));
+      }
+
+      function handleLogout() {
+        window.API.post("/api/auth/logout", {}).catch(() => {});
+        localStorage.removeItem("auditec_token");
+        localStorage.removeItem("auditec_user");
+        setUser(null); setActiveLane(null); setView("dashboard");
+      }
+
+      function handleNavigate(v) { setView(v); setActiveLane(null); }
+      function handleOpenLane(id) { setActiveLane(id); }
+
+      if (!user) return <LoginScreen onLogin={handleLogin}/>;
+
+      const laneLabel = activeLane ? (LANE_CONFIGS.find(l=>l.id===activeLane)?.name || activeLane) : null;
+      const pageInfo  = activeLane
+        ? { title: laneLabel, subtitle: "Detalle de reconciliación" }
+        : (PAGE_TITLES[view] || PAGE_TITLES.dashboard);
+
+      return (
+        <AppLayout user={user} onLogout={handleLogout} currentView={view}
+          onNavigate={handleNavigate} title={pageInfo.title} subtitle={pageInfo.subtitle}>
+          {view==="dashboard" && !activeLane && <Dashboard onOpenLane={handleOpenLane} user={user}/>}
+          {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} onBack={()=>setActiveLane(null)}/>}
+          {view==="reports"   && <ReportsScreen/>}
+          {view==="config"    && user.role==="Admin" && <ConfigScreen/>}
+          {view==="config"    && user.role!=="Admin" && (
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:12,color:"#5b6a8a"}}>
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                <circle cx="24" cy="24" r="23" stroke="#2a3045" strokeWidth="1.5"/>
+                <path d="M24 16v13M24 34v2" stroke="#5b6a8a" strokeWidth="2.5" strokeLinecap="round"/>
+              </svg>
+              <div style={{fontSize:15,fontWeight:600,color:"#e8edf5"}}>Acceso restringido</div>
+              <div style={{fontSize:13}}>Solo los administradores pueden acceder a esta sección.</div>
+            </div>
+          )}
+        </AppLayout>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>

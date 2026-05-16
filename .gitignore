@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pid
+.auditec.pid
+app_settings.db
+.claude/
+*.jpeg
+*.jpg
+*.png
