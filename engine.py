@@ -485,6 +485,8 @@ def map_avc_class(vehicle_type: str, axles: int) -> int:
             return 13
         return 14
     if "truck" in vt or "camion" in vt or "camion" in vt:
+        if ax < 2:
+            return 0
         return 9 if ax >= 9 else ax
     if ax == 2:
         return 1
@@ -498,15 +500,6 @@ def is_class_compatible(avc_cls: int, sat_cls: int, tab_cls: int) -> bool:
         return False
     if sat_cls == avc_cls or tab_cls == avc_cls:
         return True
-    if sat_cls == 0 and tab_cls == avc_cls:
-        return True
-    cat = cat_of(avc_cls)
-    if sat_cls != 0 and cat_of(sat_cls) == cat:
-        return True
-    if tab_cls != 0 and cat_of(tab_cls) == cat:
-        return True
-    if sat_cls == 0 and tab_cls != 0 and cat_of(tab_cls) == cat:
-        return True
     return False
 
 
@@ -516,14 +509,6 @@ def compat_reason(avc_cls, sat_cls, tab_cls):
         return "AVC_cls=0_error_conteo"
     if sc == ac or tc == ac:
         return "exacto"
-    if sc == 0 and tc == ac:
-        return "tab_exacto(id=0)"
-    if sc != 0 and cat_of(sc) == cat_of(ac):
-        return f"misma_cat({cat_of(ac)})_ejes_difieren"
-    if tc != 0 and cat_of(tc) == cat_of(ac):
-        return f"misma_cat_tab({cat_of(ac)})_ejes_difieren"
-    if sc == 0 and tc != 0 and cat_of(tc) == cat_of(ac):
-        return f"tab_misma_cat({cat_of(ac)})"
     return f"INCOMPAT(AVC:{ac}[{cat_of(ac)}] SAT:{sc}[{cat_of(sc)}]/TAB:{tc}[{cat_of(tc)}])"
 
 

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
 Vigila /home/sftpuser/uploads/ cada minuto.
-Fusiona los archivos SAT-TEXCOCO-<HOY>*.json en un archivo diario MERGED
-y borra cada archivo fuente despues de incorporarlo.
+Fusiona los archivos SAT-TEXCOCO-<YYYYMMDD>*.json en el MERGED diario
+que consume la API y borra cada archivo fuente despues de incorporarlo.
 """
 import glob
 import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 WATCH_DIR   = "/home/sftpuser/uploads"
-OUTPUT_DIR  = "/home/sftpuser/uploads/merged"
+OUTPUT_DIR  = os.path.expanduser("~/sat_merged")
 POLL_SECS   = 60  # intervalo entre escaneos
 
 logging.basicConfig(
@@ -53,6 +53,7 @@ def load_merged(day_str: str) -> dict:
         "sourcesystem": "SATTexcoco",
         "generatedat": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "transactions": [],
+        "processed_batches": [],
     }
 
 
@@ -83,8 +84,16 @@ def process_file(filepath: str, day_str: str) -> bool:
         return True
 
     merged = load_merged(day_str)
+    batch_id = data.get("batchuid", os.path.splitext(os.path.basename(filepath))[0])
+    processed_batches = set(merged.get("processed_batches", []))
+    if batch_id in processed_batches:
+        log.info("Lote ya incorporado, borrando duplicado: %s", os.path.basename(filepath))
+        return True
+
     before = len(merged["transactions"])
     merged["transactions"].extend(txns)
+    processed_batches.add(batch_id)
+    merged["processed_batches"] = sorted(processed_batches)
     save_merged(day_str, merged)
 
     log.info(
@@ -126,9 +135,14 @@ def main() -> None:
     processed: set = set()
 
     while True:
-        day_str = datetime.now().strftime("%Y%m%d")
+        now = datetime.now()
+        day_strs = [
+            now.strftime("%Y%m%d"),
+            (now - timedelta(days=1)).strftime("%Y%m%d"),
+        ]
         try:
-            scan_once(day_str, processed)
+            for day_str in day_strs:
+                scan_once(day_str, processed)
         except Exception as exc:
             log.error("Error inesperado en scan: %s", exc)
 

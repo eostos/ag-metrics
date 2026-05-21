@@ -14,6 +14,14 @@ Plataforma de auditoría y conciliación AVC/SAT. Incluye un backend FastAPI y u
 ./run.sh debug    # desarrollo  — primer plano, reload automático
 ```
 
+Para una instalación persistente en servidor Linux, instala los servicios `systemd`:
+
+```bash
+sudo scripts/install_systemd_services.sh
+```
+
+Esto deja activos el backend y el watcher SAT con reinicio automático.
+
 Accede en **http://localhost:8080**  
 Credenciales por defecto: `admin@auditec.mx` / `admin123`
 
@@ -26,6 +34,21 @@ Credenciales por defecto: `admin@auditec.mx` / `admin123`
 | `./run.sh stop` | Detiene el servidor en background |
 | `./run.sh status` | Muestra si el servidor está corriendo y su PID |
 | `./run.sh logs` | Sigue el log de producción en tiempo real (`tail -f`) |
+
+## Servicios de producción
+
+| Servicio | Propósito |
+|----------|-----------|
+| `auditec.service` | Backend FastAPI en puerto 8080 con 2 workers |
+| `auditec-sat-watcher.service` | Fusiona archivos SAT pendientes de hoy y ayer hacia `~/sat_merged/` |
+
+Comandos útiles:
+
+```bash
+systemctl status auditec.service --no-pager
+systemctl status auditec-sat-watcher.service --no-pager
+journalctl -u auditec-sat-watcher.service -f
+```
 
 ## Arquitectura
 

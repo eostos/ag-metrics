@@ -140,6 +140,22 @@ function LiveBar({ status, lastRefresh, bgSyncing }) {
   );
 }
 
+function BusyPill({ label, detail }) {
+  if (!label) return null;
+  return (
+    <span style={dashStyles.busyPill}>
+      <svg width="14" height="14" viewBox="0 0 14 14" style={{display:"block"}}>
+        <circle cx="7" cy="7" r="5" fill="none" stroke="#243358" strokeWidth="2"/>
+        <path d="M7 2a5 5 0 0 1 5 5" fill="none" stroke="#4d7fe0" strokeWidth="2" strokeLinecap="round">
+          <animateTransform attributeName="transform" type="rotate" from="0 7 7" to="360 7 7" dur="0.85s" repeatCount="indefinite"/>
+        </path>
+      </svg>
+      <span>{label}</span>
+      {detail && <span style={{color:"#5b6a8a"}}>{detail}</span>}
+    </span>
+  );
+}
+
 // Fecha de hoy en la zona horaria del sistema (evita usar UTC que puede ser un día diferente)
 function localToday(tz) {
   try {
@@ -166,10 +182,13 @@ function Dashboard({ onOpenLane, user }) {
   const [syncMsg,     setSyncMsg]    = React.useState("");
   const [liveStatus,  setLiveStatus] = React.useState(null);
   const [lastRefresh, setLastRefresh]= React.useState("");
+  const [activity,    setActivity]   = React.useState({label:"",detail:""});
 
   const configsRef = React.useRef(configs);
   React.useEffect(()=>{ configsRef.current = configs; }, [configs]);
 
+  const refreshInProgressRef = React.useRef(false);
+  const lastStatusSigRef     = React.useRef("");
   const bgReconDoneRef       = React.useRef(false); // marca que ya se intentó una vez
   const bgReconInProgressRef = React.useRef(false); // marca que está corriendo ahora
 
@@ -177,6 +196,7 @@ function Dashboard({ onOpenLane, user }) {
   React.useEffect(()=>{
     bgSyncedRef.current         = false;
     prevAvcRef.current          = -1;
+    lastStatusSigRef.current    = "";
     bgReconDoneRef.current      = false;
     bgReconInProgressRef.current= false;
   }, [date]);
@@ -189,21 +209,23 @@ function Dashboard({ onOpenLane, user }) {
 
   // fetchData — carga carriles desde SQLite local (sin spinner si silent=true)
   function fetchData(d, silent) {
+    if (refreshInProgressRef.current && silent) return Promise.resolve(null);
+    refreshInProgressRef.current = true;
     if (!silent) setLoading(true);
-    window.API.get(`/api/lanes?query_date=${d}`)
+    return window.API.get(`/api/lanes?query_date=${d}`)
       .then(data=>{
         setApiErr("");
         if (data && data.lanes && data.lanes.length > 0) {
           setConfigs(data.lanes);
           setStats(data.stats||{});
           // Si algún carril no tiene stats reconciliadas → conciliar en fondo
-          // bgReconcileAll tiene su propio guard (bgReconInProgressRef) para evitar duplicados
+          // bgReconcileAll tiene su propio guard para evitar duplicados.
           const needsRecon = data.lanes.some(l=>(data.stats[l.id]?.matchRate||0)===0);
-          if (needsRecon) {
-            bgReconDoneRef.current = false; // permitir reintento si el caché fue borrado
+          if (needsRecon && !bgReconDoneRef.current) {
             bgReconcileAll(data.lanes, d);
           }
         }
+        return data;
       })
       .catch(err=>{
         if (silent) return;
@@ -212,7 +234,10 @@ function Dashboard({ onOpenLane, user }) {
         else if (status===500) setApiErr("Error interno del servidor.");
         else setApiErr("No se pudo conectar al servidor.");
       })
-      .finally(()=>{ if (!silent) setLoading(false); });
+      .finally(()=>{
+        refreshInProgressRef.current = false;
+        if (!silent) setLoading(false);
+      });
   }
 
   React.useEffect(()=>{ fetchData(date); },[date]);
@@ -222,6 +247,7 @@ function Dashboard({ onOpenLane, user }) {
     if (bgReconInProgressRef.current) return; // ya está corriendo, no duplicar
     bgReconInProgressRef.current = true;
     bgReconDoneRef.current = true;
+    setActivity({label:"Conciliando",detail:`0/${lanes.length} carriles`});
 
     Promise.all([
       window.API.get("/api/config").catch(()=>({})),
@@ -230,17 +256,24 @@ function Dashboard({ onOpenLane, user }) {
       let mapping = {};
       try { mapping = typeof cfg.lane_mapping==="string" ? JSON.parse(cfg.lane_mapping||"{}") : (cfg.lane_mapping||{}); } catch(e) {}
       const satLanes = satData.lanes || [];
-      if (!satLanes.length) { bgReconInProgressRef.current = false; return; }
+      if (!satLanes.length) {
+        bgReconInProgressRef.current = false;
+        setActivity({label:"",detail:""});
+        return;
+      }
 
       const queue = [...lanes];
+      let done = 0;
       function next() {
         const lane = queue.shift();
         if (!lane) {
           bgReconInProgressRef.current = false;
-          fetchData(d, true); // actualizar stats al terminar
+          setActivity({label:"Actualizando",detail:"resumen"});
+          fetchData(d, true).finally(()=>setActivity({label:"",detail:""})); // actualizar stats al terminar
           return;
         }
         const laneId = lane.id;
+        setActivity({label:"Conciliando",detail:`${done + 1}/${lanes.length} · ${laneId}`});
         const mapped = mapping[laneId];
         const byName = satLanes.find(v=>v===laneId||v.includes(laneId)||laneId.includes(v));
         const satLane = mapped || byName || satLanes[0];
@@ -249,10 +282,10 @@ function Dashboard({ onOpenLane, user }) {
         window.API.post("/api/reconcile",{avc_lane:laneId,sat_lane:satLane,date:d,window_s:120})
           .then(()=>{})
           .catch(()=>{})
-          .finally(next);
+          .finally(()=>{ done += 1; next(); });
       }
       next();
-    }).catch(()=>{ bgReconInProgressRef.current = false; });
+    }).catch(()=>{ bgReconInProgressRef.current = false; setActivity({label:"",detail:""}); });
   }
 
   // Sync silencioso en fondo — sin spinner ni mensaje prominente
@@ -260,6 +293,7 @@ function Dashboard({ onOpenLane, user }) {
     if (bgSyncedRef.current || bgSyncing) return;
     bgSyncedRef.current = true;
     setBgSyncing(true);
+    setActivity({label:"Sincronizando AVC",detail:"en segundo plano"});
     window.API.get("/api/sources")
       .then(sources=>{
         const enabled = (Array.isArray(sources)?sources:[]).filter(s=>s.enabled);
@@ -272,14 +306,14 @@ function Dashboard({ onOpenLane, user }) {
         ).then(results=>{
           const total = results.reduce((s,r)=>s+(r.records||0),0);
           if (total > 0) {
-            fetchData(d, true); // actualizar carriles sin spinner
             setSyncMsg(`↺ ${total} eventos sincronizados`);
             setTimeout(()=>setSyncMsg(""), 4000);
+            return fetchData(d, true); // actualizar carriles sin spinner
           }
         });
       })
       .catch(()=>{})
-      .finally(()=>setBgSyncing(false));
+      .finally(()=>{ setBgSyncing(false); if (!bgReconInProgressRef.current) setActivity({label:"",detail:""}); });
   }
 
   // Polling cada 30s
@@ -303,12 +337,22 @@ function Dashboard({ onOpenLane, user }) {
           }
 
           const avcCount = s.avc_events || 0;
+          const statusSig = [
+            s.date || date,
+            s.avc_events || 0,
+            s.sat_merged || 0,
+            s.sat_pending || 0,
+            (s.avc_lanes||[]).join(","),
+            (s.sat_lanes||[]).join(","),
+          ].join("|");
 
           // Auto-merge SAT pendientes (silencioso)
           if ((s.sat_pending||0) > 0) {
+            setActivity({label:"Fusionando SAT",detail:`${s.sat_pending} pendiente(s)`});
             window.API.post("/api/merge-sat",{day:(s.date||date).replace(/-/g,"")})
               .then(r=>{ if(r&&r.ok&&r.added>0) setSyncMsg(`↺ ${r.added} SAT fusionados automáticamente`); setTimeout(()=>setSyncMsg(""),4000); })
-              .catch(()=>{});
+              .catch(()=>{})
+              .finally(()=>{ if (!bgReconInProgressRef.current && !syncing && !bgSyncing) setActivity({label:"",detail:""}); });
           }
 
           // Si no hay datos locales → auto-sync en fondo (dinámico, invisible)
@@ -317,10 +361,11 @@ function Dashboard({ onOpenLane, user }) {
             return;
           }
 
-          // Siempre refrescar stats en cada ciclo — garantiza que el SAT aparezca
-          // aunque el caché haya sido invalidado por un nuevo sync
           prevAvcRef.current = avcCount;
-          fetchData(date, true);
+          if (statusSig !== lastStatusSigRef.current) {
+            lastStatusSigRef.current = statusSig;
+            fetchData(s.date||date, true);
+          }
         })
         .catch(()=>{});
     }
@@ -331,12 +376,15 @@ function Dashboard({ onOpenLane, user }) {
 
   // Sync manual explícito (botón "Sincronizar")
   function syncFromDashboard() {
+    if (syncing || bgSyncing || bgReconInProgressRef.current) return;
     setSyncing(true); setSyncMsg(""); setApiErr("");
+    setActivity({label:"Sincronizando AVC",detail:"preparando fuentes"});
     bgSyncedRef.current = true; // marcar como hecho para no duplicar
     window.API.get("/api/sources")
       .then(sources=>{
         const enabled=(Array.isArray(sources)?sources:[]).filter(s=>s.enabled);
         if (!enabled.length) throw new Error("Sin fuentes AVC activas. Ve a Configuración → Fuentes AVC.");
+        setActivity({label:"Sincronizando AVC",detail:`${enabled.length} fuente(s)`});
         return Promise.all(enabled.map(src=>
           window.API.post(`/api/sources/${src.id}/sync`,{date})
             .catch(e=>({ok:false,error:e&&e.message||"Error",records:0}))
@@ -346,12 +394,20 @@ function Dashboard({ onOpenLane, user }) {
         const total=results.reduce((s,r)=>s+(r.records||0),0);
         const ok=results.filter(r=>r.ok).length;
         const errs=results.filter(r=>!r.ok);
-        if (total>0) { setSyncMsg(`✓ ${total} eventos de ${ok} fuente(s)`); fetchData(date); }
+        if (total>0) {
+          setSyncMsg(`✓ ${total} eventos de ${ok} fuente(s)`);
+          setActivity({label:"Actualizando",detail:"carriles"});
+          bgReconDoneRef.current = false;
+          return window.API.get(`/api/status?query_date=${date}`)
+            .then(s=>{ setLiveStatus(s); lastStatusSigRef.current = ""; })
+            .catch(()=>{})
+            .then(()=>fetchData(date, true));
+        }
         else if (errs.length) setSyncMsg(`Error: ${errs[0].error}`);
         else setSyncMsg("Sin eventos nuevos para esta fecha");
       })
       .catch(e=>setSyncMsg(e&&e.message||String(e)))
-      .finally(()=>setSyncing(false));
+      .finally(()=>{ setSyncing(false); if (!bgReconInProgressRef.current) setActivity({label:"",detail:""}); });
   }
 
   const totalEvents  = configs.reduce((s,l)=>s+(stats[l.id]?.total||0),0);
@@ -374,17 +430,17 @@ function Dashboard({ onOpenLane, user }) {
             <label style={dashStyles.fieldLabel}>Fecha</label>
             <input type="date" value={date} onChange={e=>{ dateLockedRef.current=true; setDate(e.target.value); }} style={dashStyles.select}/>
           </div>
-          {loading && <span style={{fontSize:12,color:"#5b6a8a"}}>Cargando…</span>}
+          <BusyPill label={loading?"Cargando":activity.label} detail={loading?"datos":activity.detail}/>
           <LiveBar status={liveStatus} lastRefresh={lastRefresh} bgSyncing={bgSyncing}/>
         </div>
 
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <button onClick={syncFromDashboard} disabled={syncing}
-            style={{...dashStyles.secondaryBtn,opacity:syncing?0.6:1}}>
+          <button onClick={syncFromDashboard} disabled={syncing||bgSyncing||bgReconInProgressRef.current}
+            style={{...dashStyles.secondaryBtn,opacity:(syncing||bgSyncing||bgReconInProgressRef.current)?0.6:1}}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M2 7a5 5 0 1 0 1-3M2 4V1M2 4H5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            {syncing?"Sincronizando…":"Sincronizar"}
+            {(syncing||bgSyncing)?"Sincronizando…":bgReconInProgressRef.current?"Conciliando…":"Sincronizar"}
           </button>
           <button onClick={()=>fetchData(date)} disabled={loading}
             style={{...dashStyles.primaryBtn,opacity:loading?0.7:1}}>
@@ -455,9 +511,9 @@ function Dashboard({ onOpenLane, user }) {
               {apiErr||"No hay eventos AVC sincronizados para esta fecha."}
             </div>
             {!apiErr && (
-              <button onClick={syncFromDashboard} disabled={syncing}
-                style={{...dashStyles.primaryBtn,margin:"0 auto",opacity:syncing?0.6:1}}>
-                {syncing?"Sincronizando…":"↺ Sincronizar esta fecha"}
+              <button onClick={syncFromDashboard} disabled={syncing||bgSyncing||bgReconInProgressRef.current}
+                style={{...dashStyles.primaryBtn,margin:"0 auto",opacity:(syncing||bgSyncing||bgReconInProgressRef.current)?0.6:1}}>
+                {(syncing||bgSyncing)?"Sincronizando…":bgReconInProgressRef.current?"Conciliando…":"↺ Sincronizar esta fecha"}
               </button>
             )}
           </div>
@@ -601,6 +657,7 @@ const dashStyles = {
   select:       {background:"#0d1525",border:"1px solid #2a3045",borderRadius:7,padding:"7px 12px",color:"#e8edf5",fontSize:13,fontFamily:"inherit",outline:"none"},
   primaryBtn:   {display:"flex",alignItems:"center",gap:7,background:"#4d7fe0",border:"none",borderRadius:8,padding:"9px 16px",color:"#080d1a",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",flexShrink:0},
   secondaryBtn: {display:"flex",alignItems:"center",gap:7,background:"transparent",border:"1px solid #2a3045",borderRadius:8,padding:"8px 14px",color:"#8a9ab5",fontSize:13,cursor:"pointer",fontFamily:"inherit",flexShrink:0},
+  busyPill:     {display:"inline-flex",alignItems:"center",gap:7,background:"rgba(77,127,224,0.08)",border:"1px solid rgba(77,127,224,0.25)",borderRadius:7,padding:"5px 9px",color:"#8a9ab5",fontSize:11,whiteSpace:"nowrap"},
   kpiStrip:     {display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12,marginBottom:24},
   kpiCard:      {background:"#0d1525",border:"1px solid #2a3045",borderRadius:10,padding:"14px 18px",display:"flex",alignItems:"center",gap:12},
   laneGrid:     {display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:14,marginBottom:24},
