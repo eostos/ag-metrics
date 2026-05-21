@@ -30,7 +30,7 @@
   <script>
     // Limpiar caché de Babel standalone para forzar recompilación con el nuevo diseño
     (function(){
-      var ver = "20260506b";
+      var ver = "20260521d";
       if (localStorage.getItem("agm_ver") !== ver) {
         Object.keys(localStorage).forEach(function(k){
           if (k.startsWith("babel-") || k.startsWith("__babel")) localStorage.removeItem(k);
@@ -39,13 +39,14 @@
       }
     })();
   </script>
-  <script type="text/babel" src="components/MockData.jsx?v=20260506b"></script>
-  <script type="text/babel" src="components/Auth.jsx?v=20260506b"></script>
-  <script type="text/babel" src="components/Layout.jsx?v=20260506b"></script>
-  <script type="text/babel" src="components/Dashboard.jsx?v=20260506b"></script>
-  <script type="text/babel" src="components/LaneDetail.jsx?v=20260506b"></script>
-  <script type="text/babel" src="components/Config.jsx?v=20260506b"></script>
-  <script type="text/babel" src="components/Reports.jsx?v=20260506b"></script>
+  <script type="text/babel" src="components/MockData.jsx?v=20260521d"></script>
+  <script type="text/babel" src="components/Auth.jsx?v=20260521d"></script>
+  <script type="text/babel" src="components/Layout.jsx?v=20260521d"></script>
+  <script type="text/babel" src="components/Dashboard.jsx?v=20260521d"></script>
+  <script type="text/babel" src="components/LaneDetail.jsx?v=20260521d"></script>
+  <script type="text/babel" src="components/Config.jsx?v=20260521d"></script>
+  <script type="text/babel" src="components/Reports.jsx?v=20260521d"></script>
+  <script type="text/babel" src="components/Operations.jsx?v=20260521d"></script>
 
   <script type="text/babel">
     // Global API client
@@ -65,23 +66,248 @@
       put:  (url, body) => fetch(url, { method:"PUT",  headers: window.API.headers(), body: JSON.stringify(body) }).then(window.API._handle),
     };
 
+    const I18N = {
+      es: {
+        "Dashboard":"Dashboard",
+        "Reports":"Reportes",
+        "Report configuration, templates and history":"Configuración, plantillas e historial de reportes",
+        "Alarms":"Alarmas",
+        "Alarm rules, open alarms and history":"Reglas, alarmas abiertas e historial",
+        "Notifications":"Notificaciones",
+        "Email notification history and contact groups":"Historial de notificaciones y grupos de contacto",
+        "Settings":"Configuración",
+        "Global Email / SMTP Configuration":"Configuración global de Email / SMTP",
+        "System Configuration":"Configuración del Sistema",
+        "Integrations, system and users":"Integraciones, sistema y usuarios",
+        "Report List":"Lista de Reportes",
+        "Create Report":"Crear Reporte",
+        "Report Settings":"Configuración de Reportes",
+        "Report Templates":"Plantillas de Reporte",
+        "Report History":"Historial de Reportes",
+        "Active Alarms":"Alarmas Activas",
+        "Alarm Rules":"Reglas de Alarma",
+        "Create Alarm Rule":"Crear Regla de Alarma",
+        "Alarm Settings":"Configuración de Alarmas",
+        "Alarm History":"Historial de Alarmas",
+        "Notification History":"Historial de Notificaciones",
+        "Contact Groups":"Grupos de Contacto",
+        "Email / SMTP Configuration":"Configuración Email / SMTP",
+        "Report name":"Nombre del reporte",
+        "Report type":"Tipo de reporte",
+        "Frequency":"Frecuencia",
+        "Recipients":"Destinatarios",
+        "Status":"Estado",
+        "Last sent":"Último envío",
+        "Actions":"Acciones",
+        "View":"Ver",
+        "Edit":"Editar",
+        "Send now":"Enviar ahora",
+        "Preview PDF":"Previsualizar PDF",
+        "Enable":"Activar",
+        "Disable":"Desactivar",
+        "View history":"Ver historial",
+        "Plaza":"Plaza",
+        "Lanes":"Carriles",
+        "Report period":"Período del reporte",
+        "Send time":"Hora de envío",
+        "Contact Group":"Grupo de contacto",
+        "PDF template":"Plantilla PDF",
+        "Save as Draft":"Guardar borrador",
+        "Activate Report":"Activar reporte",
+        "Generate Preview PDF":"Generar PDF previo",
+        "Send Test Report":"Enviar reporte de prueba",
+        "Default timezone":"Zona horaria default",
+        "Default PDF template":"Plantilla PDF default",
+        "Default report language":"Idioma default del reporte",
+        "Attach PDF to email":"Adjuntar PDF al correo",
+        "Default footer text":"Texto default del pie",
+        "Save Settings":"Guardar configuración",
+        "Template name":"Nombre de plantilla",
+        "Logo":"Logo",
+        "Header text":"Texto de encabezado",
+        "Footer text":"Texto de pie",
+        "Language":"Idioma",
+        "Preview":"Previsualizar",
+        "Set as default":"Marcar default",
+        "Date/time":"Fecha/hora",
+        "Period covered":"Período cubierto",
+        "PDF file":"Archivo PDF",
+        "Error message if failed":"Error si falló",
+        "Download PDF":"Descargar PDF",
+        "Resend":"Reenviar",
+        "View notification log":"Ver log de notificación",
+        "Alarm name":"Nombre de alarma",
+        "Severity":"Severidad",
+        "Lane":"Carril",
+        "Event type":"Tipo de evento",
+        "Triggered at":"Detectada en",
+        "View details":"Ver detalle",
+        "Acknowledge":"Reconocer",
+        "Mark as in review":"Marcar en revisión",
+        "Resolve":"Resolver",
+        "Ignore":"Ignorar",
+        "Rule name":"Nombre de regla",
+        "Send mode":"Modo de envío",
+        "Cooldown":"Enfriamiento",
+        "Test":"Probar",
+        "View alarm history":"Ver historial de alarmas",
+        "View notification history":"Ver historial de notificaciones",
+        "Alarm rule name":"Nombre de regla",
+        "Description":"Descripción",
+        "Trigger condition":"Condición de disparo",
+        "Save as Draft":"Guardar borrador",
+        "Activate Alarm":"Activar alarma",
+        "Test Rule":"Probar regla",
+        "Send Test Alarm Email":"Enviar correo de prueba",
+        "Default severity":"Severidad default",
+        "Default cooldown in minutes":"Enfriamiento default en minutos",
+        "Enable alarm emails by default":"Activar emails de alarma por default",
+        "Default contact group for critical alarms":"Grupo default para alarmas críticas",
+        "Keep alarm history for X days":"Conservar historial X días",
+        "Notification status":"Estado de notificación",
+        "Resolved at":"Resuelta en",
+        "View related transaction":"Ver transacción relacionada",
+        "Group name":"Nombre del grupo",
+        "Emails":"Correos",
+        "Create group":"Crear grupo",
+        "Edit group":"Editar grupo",
+        "Delete group":"Eliminar grupo",
+        "Add recipient":"Agregar destinatario",
+        "Remove recipient":"Quitar destinatario",
+        "Notification type":"Tipo de notificación",
+        "Related report or alarm":"Reporte o alarma relacionada",
+        "Subject":"Asunto",
+        "Error message":"Mensaje de error",
+        "Retry":"Reintentar",
+        "View related report":"Ver reporte relacionado",
+        "View related alarm":"Ver alarma relacionada",
+        "SMTP host":"Servidor SMTP",
+        "SMTP port":"Puerto SMTP",
+        "Security type":"Tipo de seguridad",
+        "SMTP username":"Usuario SMTP",
+        "SMTP password hidden":"Contraseña SMTP oculta",
+        "From email":"Correo remitente",
+        "From name":"Nombre remitente",
+        "Enable/disable email sending":"Activar/desactivar envío de correo",
+        "Test email recipient":"Correo destinatario de prueba",
+        "Test SMTP Connection":"Probar conexión SMTP",
+        "Send Test Email":"Enviar correo de prueba",
+        "Save Configuration":"Guardar configuración",
+        "Report Preview":"Vista previa del reporte",
+        "Report Setup":"Configuración del reporte",
+        "Refresh Preview":"Actualizar vista previa",
+        "Loading...":"Cargando...",
+        "Matched":"Coincidencias",
+        "AVC only":"Solo AVC",
+        "SAT only":"Solo SAT",
+        "Axle errors":"Errores de ejes",
+        "Total events":"Eventos totales",
+        "Discrepancies":"Discrepancias",
+        "Detection rate":"Tasa de detección",
+        "Class mismatch":"Clase distinta",
+        "Results by lane and day":"Resultados por carril y día",
+        "No reconciliation data for this selection":"Sin datos de conciliación para esta selección",
+        "Report content":"Contenido del reporte",
+        "Template":"Plantilla",
+        "Period":"Período",
+        "Tables":"Tablas",
+        "Charts":"Gráficas",
+        "Summary, discrepancies, lane detail":"Resumen, discrepancias y detalle por carril",
+        "KPI cards and lane/day bars":"KPIs y barras por carril/día",
+        "Discrepancy rate":"% discrepancia",
+        "No rows to include in the report":"No hay filas para incluir en el reporte",
+        "All available lanes":"Todos los carriles disponibles",
+        "lanes selected":"carriles seleccionados",
+        "Enabled":"Activado",
+        "Disabled":"Desactivado",
+        "Daily Toll Audit Report":"Reporte diario de auditoría de peaje",
+        "SAT vs AG-Metrics Comparison":"Comparativo SAT vs AG-Metrics",
+        "Axle Count Discrepancy Report":"Reporte de discrepancias de ejes",
+        "Vehicle Classification Mismatch Report":"Reporte de diferencias de clasificación",
+        "Possible Evasion Report":"Reporte de posible evasión",
+        "Previous hour":"Hora anterior",
+        "Previous day":"Día anterior",
+        "Previous week":"Semana anterior",
+        "Custom date range":"Rango personalizado",
+        "Manual only":"Solo manual",
+        "Hourly":"Cada hora",
+        "Daily":"Diario",
+        "Weekly":"Semanal",
+        "Yes":"Sí",
+        "No":"No",
+        "English":"Inglés",
+        "Spanish":"Español",
+        "Info":"Informativa",
+        "Warning":"Advertencia",
+        "Critical":"Crítica",
+        "Immediately":"Inmediato",
+        "Every 15 minutes":"Cada 15 minutos",
+        "Hourly digest":"Resumen horario",
+        "Do not email":"No enviar correo",
+        "Acceso restringido":"Acceso restringido",
+        "Solo los administradores pueden acceder a esta sección.":"Solo los administradores pueden acceder a esta sección.",
+        "Salir":"Salir",
+        "Fuentes AVC":"Fuentes AVC",
+        "Integración SAT":"Integración SAT",
+        "Sistema":"Sistema",
+        "Usuarios y Permisos":"Usuarios y Permisos",
+      },
+      en: {
+        "Resumen de conciliación AVC/SAT por carril":"AVC/SAT reconciliation summary by lane",
+        "Detalle de reconciliación":"Reconciliation detail",
+        "Acceso restringido":"Restricted access",
+        "Solo los administradores pueden acceder a esta sección.":"Only administrators can access this section.",
+        "Salir":"Logout",
+        "Fuentes AVC":"AVC Sources",
+        "Integración SAT":"SAT Integration",
+        "Sistema":"System",
+        "Usuarios y Permisos":"Users and Permissions",
+      },
+    };
+    window.getUILanguage = () => localStorage.getItem("agm_ui_language") || "es";
+    window.t = (text) => {
+      const lang = window.getUILanguage();
+      return (I18N[lang] && I18N[lang][text]) || text;
+    };
+
     const PAGE_TITLES = {
       dashboard: { title: "Dashboard", subtitle: "Resumen de conciliación AVC/SAT por carril" },
-      reports:   { title: "Reportes",  subtitle: "Análisis de período y exportación" },
-      config:    { title: "Configuración", subtitle: "Integraciones, sistema y usuarios" },
+      reports:   { title: "Reports",  subtitle: "Report configuration, templates and history" },
+      alarms:    { title: "Alarms", subtitle: "Alarm rules, open alarms and history" },
+      notifications: { title: "Notifications", subtitle: "Email notification history and contact groups" },
+      settings:  { title: "Settings", subtitle: "Global Email / SMTP Configuration" },
+      config:    { title: "System Configuration", subtitle: "Integrations, system and users" },
     };
 
     function App() {
       const [user, setUser]         = React.useState(null);
       const [view, setView]         = React.useState("dashboard");
       const [activeLane, setActiveLane] = React.useState(null);
+      const [uiLanguage, setUiLanguage] = React.useState(window.getUILanguage());
 
       React.useEffect(() => {
         try {
           const saved = localStorage.getItem("auditec_user");
           if (saved) setUser(JSON.parse(saved));
         } catch(e) {}
+        function onLang(e) {
+          const next = (e.detail && e.detail.language) || window.getUILanguage();
+          localStorage.setItem("agm_ui_language", next);
+          setUiLanguage(next);
+        }
+        window.addEventListener("agm-language-change", onLang);
+        return () => window.removeEventListener("agm-language-change", onLang);
       }, []);
+
+      React.useEffect(() => {
+        if (!user) return;
+        window.API.get("/api/config").then(cfg => {
+          if (cfg.ui_language) {
+            localStorage.setItem("agm_ui_language", cfg.ui_language);
+            setUiLanguage(cfg.ui_language);
+          }
+        }).catch(()=>{});
+      }, [user]);
 
       function handleLogin(u) {
         setUser(u);
@@ -101,25 +327,30 @@
       if (!user) return <LoginScreen onLogin={handleLogin}/>;
 
       const laneLabel = activeLane ? (LANE_CONFIGS.find(l=>l.id===activeLane)?.name || activeLane) : null;
+      const viewRoot = String(view || "dashboard").split(":")[0];
+      const viewSection = String(view || "").split(":")[1] || "";
       const pageInfo  = activeLane
         ? { title: laneLabel, subtitle: "Detalle de reconciliación" }
-        : (PAGE_TITLES[view] || PAGE_TITLES.dashboard);
+        : (PAGE_TITLES[viewRoot] || PAGE_TITLES.dashboard);
 
       return (
         <AppLayout user={user} onLogout={handleLogout} currentView={view}
-          onNavigate={handleNavigate} title={pageInfo.title} subtitle={pageInfo.subtitle}>
+          onNavigate={handleNavigate} title={window.t(pageInfo.title)} subtitle={window.t(pageInfo.subtitle)}>
           {view==="dashboard" && !activeLane && <Dashboard onOpenLane={handleOpenLane} user={user}/>}
           {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} onBack={()=>setActiveLane(null)}/>}
-          {view==="reports"   && <ReportsScreen/>}
+          {viewRoot==="reports" && <ReportsModule section={viewSection || "list"}/>}
+          {viewRoot==="alarms" && user.role==="Admin" && <AlarmsModule section={viewSection || "active"}/>}
+          {viewRoot==="notifications" && user.role==="Admin" && <NotificationsModule section={viewSection || "history"}/>}
+          {viewRoot==="settings" && user.role==="Admin" && <SettingsModule/>}
           {view==="config"    && user.role==="Admin" && <ConfigScreen/>}
-          {view==="config"    && user.role!=="Admin" && (
+          {["config","alarms","notifications","settings"].includes(viewRoot) && user.role!=="Admin" && (
             <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:12,color:"#5b6a8a"}}>
               <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
                 <circle cx="24" cy="24" r="23" stroke="#2a3045" strokeWidth="1.5"/>
                 <path d="M24 16v13M24 34v2" stroke="#5b6a8a" strokeWidth="2.5" strokeLinecap="round"/>
               </svg>
-              <div style={{fontSize:15,fontWeight:600,color:"#e8edf5"}}>Acceso restringido</div>
-              <div style={{fontSize:13}}>Solo los administradores pueden acceder a esta sección.</div>
+              <div style={{fontSize:15,fontWeight:600,color:"#e8edf5"}}>{window.t("Acceso restringido")}</div>
+              <div style={{fontSize:13}}>{window.t("Solo los administradores pueden acceder a esta sección.")}</div>
             </div>
           )}
         </AppLayout>

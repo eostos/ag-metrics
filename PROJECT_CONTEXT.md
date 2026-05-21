@@ -62,7 +62,118 @@ This reconciliation process produces an audit trail per lane, per date, with det
 - Lane Detail shows all events per lane filtered by: All / Matches / AVC-only / SAT-only / Axle Errors.
 - Evidence panel shows AVC vehicle image (proxied via SSH from remote media path).
 - Reports screen uses `/api/reports/summary` for real data from `recon_cache`, with global KPIs, discrepancy motive breakdown, worst lane/day rows, and Excel export.
-- Admin Config includes Report Email Settings for SMTP, recipients by report type, daily/weekly schedules, test email, and immediate PDF report delivery. Automated sends run from the backend scheduler and are guarded by a lock to avoid duplicate sends with multiple workers.
+- The active navigation now separates operational modules: Reports, Alarms, Notifications, and Settings. The legacy technical configuration remains available as `Settings -> System Configuration`.
+- SMTP configuration is global and lives under `Settings -> Email / SMTP Configuration`. Do not duplicate SMTP forms inside Reports or Alarms.
+- Automated report sends run from the backend scheduler and are guarded by a lock to avoid duplicate sends with multiple workers.
+
+---
+
+## Current UI/Configuration State
+
+The frontend remains a no-build React app served from `frontend/AUDITEC.html`. New operational pages are implemented in `frontend/components/Operations.jsx`, loaded by `AUDITEC.html`.
+
+### Navigation
+
+Current main navigation:
+
+```text
+Dashboard
+Reports
+  - Report List
+  - Create Report
+  - Report Settings
+  - Report Templates
+  - Report History
+Alarms
+  - Active Alarms
+  - Alarm Rules
+  - Create Alarm Rule
+  - Alarm Settings
+  - Alarm History
+Notifications
+  - Notification History
+  - Contact Groups
+Settings
+  - Email / SMTP Configuration
+  - System Configuration
+```
+
+`System Configuration` is the old technical config screen and still contains:
+
+```text
+Fuentes AVC
+Integración SAT
+Sistema
+Usuarios y Permisos
+```
+
+The old `Report Email Settings` tab was intentionally removed from `System Configuration` to avoid duplicating SMTP configuration.
+
+### SMTP / Email Rules
+
+- The existing SMTP/email implementation is working and must not be replaced.
+- Existing email routes are still the source of truth:
+  - `GET /api/report-email/settings`
+  - `POST /api/report-email/settings`
+  - `POST /api/report-email/test`
+  - `POST /api/report-email/send-now`
+- `Settings -> Email / SMTP Configuration` uses the existing `/api/report-email/*` routes.
+- Reports and Alarms must reuse `_send_report_email()` and `_report_email_settings()` in `api.py`; do not create a second mailer.
+- Do not print SMTP passwords or source credentials.
+
+### Reports Module
+
+Reports Phase 1 is UI/configuration-first:
+
+- Report configurations are stored as JSON in `app_settings` under `report_configs`.
+- Report-level settings are stored under `report_settings`.
+- Report templates are stored under `report_templates`.
+- Report history is stored under `report_history`.
+- A default `Standard PDF` template is always returned by `GET /api/report-templates`, even if stored templates are empty or incomplete.
+- `Create Report` pulls real system data:
+  - Plaza from `GET /api/config` (`plaza_name`)
+  - Lanes from `GET /api/avc/lanes`
+  - Contact groups from `GET /api/contact-groups`
+  - PDF templates from `GET /api/report-templates`
+- `Create Report` includes a visual report builder preview before the setup fields:
+  - KPI cards
+  - Chart.js bar chart by lane/day
+  - Report content summary
+  - Preview table filtered by report type and selected lanes
+- `Generate Preview PDF` opens a print-ready browser report with company logo (`/logo.jpeg`), the same KPI indicators, chart-style bars, scope summary, and detail table so the user can print/save as PDF without changing SMTP/email sending logic. The printable CSS uses `print-color-adjust: exact` to preserve colors/backgrounds in browser PDF export.
+- `Send Test Report` in Create Report posts to `POST /api/report-email/send-preview`, which reuses the existing SMTP service but sends the designed report for the current builder selection instead of the older plain SMTP test PDF.
+- Send now / test report paths reuse the existing report email route and PDF generation flow.
+
+### Alarms Module
+
+Alarms Phase 1 is basic configuration/history only:
+
+- Alarm rules are stored as JSON in `app_settings` under `alarm_rules`.
+- Active alarms are stored under `active_alarms`.
+- Alarm settings are stored under `alarm_settings`.
+- Alarm history is stored under `alarm_history`.
+- Test alarm email uses existing SMTP/email logic through `_send_report_email()`.
+- Do not add camera-related alarms, camera offline logic, camera health settings, or camera auto-resolve logic.
+
+### Notifications Module
+
+- Contact groups are stored under `contact_groups`.
+- Notification history is stored under `notification_history`.
+- Default contact groups returned by the API if none are saved:
+  - Toll Audit Team
+  - Operations Team
+  - Management
+  - IT Support
+- Notification history should include report emails, alarm emails, and system test emails.
+
+### Language Preference
+
+- The platform has a basic English/Spanish UI language preference.
+- The selector is in `Settings -> System Configuration -> Sistema`.
+- It is saved in `/api/config` as `ui_language`.
+- The frontend also mirrors the value to `localStorage` key `agm_ui_language`.
+- `frontend/AUDITEC.html` defines `window.t()` and the base translation dictionary.
+- Current translation coverage focuses on the main navigation, module headings, shared controls, and new Operations pages. It does not yet fully translate all older Dashboard/Lane Detail/technical config text.
 
 ---
 

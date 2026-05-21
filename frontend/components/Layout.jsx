@@ -8,18 +8,48 @@ const NAV_ITEMS = [
       <rect x="10" y="10" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
     </svg>
   )},
-  { id: "reports", label: "Reportes", icon: (
+  { id: "reports:list", label: "Reports", icon: (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
       <rect x="2" y="2" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.5"/>
       <path d="M5 9h8M5 6h5M5 12h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
     </svg>
-  )},
-  { id: "config", label: "Configuración", adminOnly: true, icon: (
+  ), children: [
+    { id: "reports:list", label: "Report List" },
+    { id: "reports:create", label: "Create Report" },
+    { id: "reports:settings", label: "Report Settings" },
+    { id: "reports:templates", label: "Report Templates" },
+    { id: "reports:history", label: "Report History" },
+  ]},
+  { id: "alarms:active", label: "Alarms", adminOnly: true, icon: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <path d="M9 2l7 13H2L9 2Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
+      <path d="M9 6v4M9 13h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+    </svg>
+  ), children: [
+    { id: "alarms:active", label: "Active Alarms" },
+    { id: "alarms:rules", label: "Alarm Rules" },
+    { id: "alarms:create", label: "Create Alarm Rule" },
+    { id: "alarms:settings", label: "Alarm Settings" },
+    { id: "alarms:history", label: "Alarm History" },
+  ]},
+  { id: "notifications:history", label: "Notifications", adminOnly: true, icon: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <path d="M3 5l6 5 6-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+      <rect x="2" y="4" width="14" height="10" rx="2" stroke="currentColor" strokeWidth="1.5"/>
+    </svg>
+  ), children: [
+    { id: "notifications:history", label: "Notification History" },
+    { id: "notifications:groups", label: "Contact Groups" },
+  ]},
+  { id: "settings:email", label: "Settings", adminOnly: true, icon: (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
       <circle cx="9" cy="9" r="2.5" stroke="currentColor" strokeWidth="1.5"/>
       <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M3.22 14.78l1.42-1.42M13.36 4.64l1.42-1.42" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
     </svg>
-  )},
+  ), children: [
+    { id: "settings:email", label: "Email / SMTP Configuration" },
+    { id: "config", label: "System Configuration" },
+  ]},
 ];
 
 // AG mark — chevron stripes inspired by the AG Holdings logo
@@ -36,6 +66,8 @@ function AGMark({ size = 28 }) {
 
 function Sidebar({ currentView, onNavigate, user, collapsed, setCollapsed }) {
   const items = NAV_ITEMS.filter(i => !i.adminOnly || user.role === "Admin");
+  const currentRoot = String(currentView || "").split(":")[0];
+  const tr = window.t || (v => v);
 
   return (
     <div style={{...layoutStyles.sidebar, width: collapsed ? 64 : 230, transition: "width 0.25s ease"}}>
@@ -73,25 +105,43 @@ function Sidebar({ currentView, onNavigate, user, collapsed, setCollapsed }) {
       {/* ── Nav items ── */}
       <nav style={{flex:1, padding:"8px 0"}}>
         {items.map(item => {
-          const active = currentView === item.id;
+          const root = String(item.id).split(":")[0];
+          const active = currentView === item.id || currentRoot === root;
           return (
-            <button key={item.id} onClick={() => onNavigate(item.id)}
-              title={collapsed ? item.label : ""}
-              style={{
-                ...layoutStyles.navItem,
-                background: active ? "rgba(77,127,224,0.12)" : "transparent",
-                color:      active ? "#4d7fe0" : "#7a8aaa",
-                borderLeft: active ? "3px solid #4d7fe0" : "3px solid transparent",
-                justifyContent: collapsed ? "center" : "flex-start",
-                padding:    collapsed ? "11px 0" : "11px 20px",
-              }}>
-              <span style={{flexShrink:0}}>{item.icon}</span>
-              {!collapsed && (
-                <span style={{marginLeft:12, fontSize:13, fontWeight: active ? 600 : 400}}>
-                  {item.label}
-                </span>
+            <div key={item.id}>
+              <button onClick={() => onNavigate(item.id)}
+                title={collapsed ? tr(item.label) : ""}
+                style={{
+                  ...layoutStyles.navItem,
+                  background: active ? "rgba(77,127,224,0.12)" : "transparent",
+                  color:      active ? "#4d7fe0" : "#7a8aaa",
+                  borderLeft: active ? "3px solid #4d7fe0" : "3px solid transparent",
+                  justifyContent: collapsed ? "center" : "flex-start",
+                  padding:    collapsed ? "11px 0" : "11px 20px",
+                }}>
+                <span style={{flexShrink:0}}>{item.icon}</span>
+                {!collapsed && (
+                  <span style={{marginLeft:12, fontSize:13, fontWeight: active ? 600 : 400}}>
+                    {tr(item.label)}
+                  </span>
+                )}
+              </button>
+              {!collapsed && active && item.children && (
+                <div style={{padding:"4px 0 8px 43px"}}>
+                  {item.children.map(child => (
+                    <button key={child.id} onClick={() => onNavigate(child.id)}
+                      style={{
+                        display:"block", width:"100%", textAlign:"left", background:"none", border:"none",
+                        color: currentView===child.id ? "#e8edf5" : "#5b6a8a",
+                        fontSize:12, padding:"6px 10px", cursor:"pointer", fontFamily:"inherit",
+                        borderLeft: currentView===child.id ? "2px solid #4d7fe0" : "2px solid #1e2535",
+                      }}>
+                      {tr(child.label)}
+                    </button>
+                  ))}
+                </div>
               )}
-            </button>
+            </div>
           );
         })}
       </nav>
@@ -112,6 +162,7 @@ function Sidebar({ currentView, onNavigate, user, collapsed, setCollapsed }) {
 const ROLE_COLORS = { Admin: "#4d7fe0", Auditor: "#5b9cf6", Operator: "#f5d433" };
 
 function TopBar({ user, onLogout, title, subtitle }) {
+  const tr = window.t || (v => v);
   return (
     <div style={layoutStyles.topbar}>
       <div>
@@ -133,7 +184,7 @@ function TopBar({ user, onLogout, title, subtitle }) {
             <path d="M6 1H2a1 1 0 00-1 1v11a1 1 0 001 1h4M10 11l4-4-4-4M14 7.5H6"
               stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Salir
+          {tr("Salir")}
         </button>
       </div>
     </div>

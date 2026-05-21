@@ -124,3 +124,14 @@ print('map_avc_class(\"truck\", 5):', map_avc_class('truck', 5))
 - Do not rename the `reconcile()` function in `engine.py` — it is called directly by `api.py`.
 - Do not change column names in the reconciliation result DataFrame — the frontend renders specific field names (`tipo`, `match_valido`, `nota_ejes`, `delta_segundos`, `id_classe`, `tab_id_classe`, etc.).
 - Add comments only when the business reason is non-obvious; avoid paraphrasing code in comments.
+
+---
+
+## Current UI Module Notes
+
+- The main operational UI now uses `frontend/components/Operations.jsx` for Reports, Alarms, Notifications, and `Settings -> Email / SMTP Configuration`.
+- The old technical config screen remains as `Settings -> System Configuration`.
+- Do not re-add `Report Email Settings` inside `System Configuration`; SMTP is now centralized under `Settings -> Email / SMTP Configuration`.
+- Do not replace or duplicate SMTP logic. Reuse the existing `/api/report-email/*` routes and `_send_report_email()` in `api.py`.
+- Basic UI language selection lives in `Settings -> System Configuration -> Sistema`, saved as `ui_language` via `/api/config` and mirrored to `localStorage` key `agm_ui_language`.
+- Report template default behavior: `GET /api/report-templates` must always provide `Standard PDF` as a default option.

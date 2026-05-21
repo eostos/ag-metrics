@@ -9,6 +9,7 @@ Run: uvicorn api:app --host 0.0.0.0 --port 8080 --reload
 from __future__ import annotations
 
 import asyncio
+import base64
 import glob
 import hashlib
 import fcntl
@@ -478,6 +479,77 @@ def _set_app_setting_json(key: str, value: Any) -> None:
         )
 
 
+def _setting_list(key: str) -> List[Dict[str, Any]]:
+    value = _get_app_setting_json(key, [])
+    return value if isinstance(value, list) else []
+
+
+def _save_setting_list(key: str, rows: List[Dict[str, Any]]) -> None:
+    _set_app_setting_json(key, rows)
+
+
+def _next_row_id(rows: List[Dict[str, Any]]) -> int:
+    return max([int(r.get("id") or 0) for r in rows] or [0]) + 1
+
+
+def _upsert_setting_row(key: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    rows = _setting_list(key)
+    now = _now()
+    if body.get("id"):
+        row_id = int(body["id"])
+        updated = None
+        new_rows = []
+        for row in rows:
+            if int(row.get("id") or 0) == row_id:
+                updated = {**row, **body, "id": row_id, "updated_at": now}
+                new_rows.append(updated)
+            else:
+                new_rows.append(row)
+        if updated is None:
+            updated = {**body, "id": row_id, "created_at": now, "updated_at": now}
+            new_rows.append(updated)
+        rows = new_rows
+    else:
+        updated = {**body, "id": _next_row_id(rows), "created_at": now, "updated_at": now}
+        rows.append(updated)
+    _save_setting_list(key, rows)
+    return updated
+
+
+def _append_setting_row(key: str, body: Dict[str, Any], limit: int = 500) -> Dict[str, Any]:
+    rows = _setting_list(key)
+    row = {**body, "id": _next_row_id(rows), "created_at": body.get("created_at") or _now()}
+    rows.insert(0, row)
+    _save_setting_list(key, rows[:limit])
+    return row
+
+
+def _record_notification(kind: str, related: str, subject: str, recipients: List[str],
+                         status: str, error: str = "") -> Dict[str, Any]:
+    return _append_setting_row("notification_history", {
+        "date_time": _now(),
+        "type": kind,
+        "related": related,
+        "subject": subject,
+        "recipients": recipients,
+        "status": status,
+        "error": error,
+    })
+
+
+def _record_report_history(name: str, period: str, recipients: List[str],
+                           status: str, pdf_file: str = "", error: str = "") -> Dict[str, Any]:
+    return _append_setting_row("report_history", {
+        "date_time": _now(),
+        "report_name": name,
+        "period": period,
+        "recipients": recipients,
+        "status": status,
+        "pdf_file": pdf_file,
+        "error": error,
+    })
+
+
 def _default_report_email_settings() -> Dict[str, Any]:
     cfg = load_saved_settings()
     return {
@@ -581,6 +653,304 @@ def _report_pdf_bytes(title: str, report: Dict[str, Any]) -> bytes:
     return bytes(pdf)
 
 
+def _html_escape(value: Any) -> str:
+    return (
+        str(value if value is not None else "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def _report_rows_for_type(rows: List[Dict[str, Any]], report_type: str) -> List[Dict[str, Any]]:
+    if report_type == "Axle Count Discrepancy Report":
+        return [r for r in rows if int(r.get("axleErr") or 0) > 0]
+    if report_type == "Vehicle Classification Mismatch Report":
+        return [r for r in rows if int(r.get("classMismatch") or 0) > 0]
+    if report_type == "Possible Evasion Report":
+        return [r for r in rows if int(r.get("satOnly") or 0) > 0 or int(r.get("avcOnly") or 0) > 0]
+    return rows
+
+
+def _designed_report_html_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> bytes:
+    lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
+    rows = [
+        r for r in report.get("rows", [])
+        if not lanes or r.get("lane") in lanes
+    ]
+    rows = _report_rows_for_type(rows, form.get("type") or "")
+    totals = {
+        "total": sum(int(r.get("total") or 0) for r in rows),
+        "matched": sum(int(r.get("matched") or 0) for r in rows),
+        "avcOnly": sum(int(r.get("avcOnly") or 0) for r in rows),
+        "satOnly": sum(int(r.get("satOnly") or 0) for r in rows),
+        "axleErr": sum(int(r.get("axleErr") or 0) for r in rows),
+        "classMismatch": sum(int(r.get("classMismatch") or 0) for r in rows),
+    }
+    totals["discrepancy"] = totals["avcOnly"] + totals["satOnly"] + totals["axleErr"]
+    totals["matchRate"] = round((totals["total"] - totals["satOnly"]) / max(totals["total"], 1) * 100, 1)
+    max_total = max([int(r.get("total") or 0) for r in rows] or [1])
+    logo_data = ""
+    logo_path = os.path.join(BASE_DIR, "frontend", "logo.jpeg")
+    try:
+        with open(logo_path, "rb") as fh:
+            logo_data = "data:image/jpeg;base64," + base64.b64encode(fh.read()).decode("ascii")
+    except Exception:
+        logo_data = "/logo.jpeg"
+
+    def n(value: Any) -> str:
+        try:
+            return f"{int(value):,}"
+        except Exception:
+            return str(value or 0)
+
+    chart_rows = []
+    for r in rows[:12]:
+        total = max(int(r.get("total") or 0), 1)
+        row_width = max(8, round(int(r.get("total") or 0) / max(max_total, 1) * 100))
+        def seg(key: str) -> int:
+            value = int(r.get(key) or 0)
+            return max(4 if value else 0, round(value / total * 100))
+        chart_rows.append(
+            f"""<div class="bar-row">
+              <div class="bar-label"><strong>{_html_escape(r.get('lane'))}</strong><span>{_html_escape(r.get('date'))}</span></div>
+              <div class="bar-shell" style="width:{row_width}%">
+                <div class="seg matched" style="width:{seg('matched')}%"></div>
+                <div class="seg avc" style="width:{seg('avcOnly')}%"></div>
+                <div class="seg sat" style="width:{seg('satOnly')}%"></div>
+                <div class="seg axle" style="width:{seg('axleErr')}%"></div>
+              </div>
+              <strong>{n(r.get('total'))}</strong>
+            </div>"""
+        )
+    table_rows = "\n".join(
+        f"""<tr><td>{_html_escape(r.get('date'))}</td><td>{_html_escape(r.get('lane'))}</td><td>{n(r.get('total'))}</td>
+        <td>{n(r.get('matched'))}</td><td>{n(r.get('avcOnly'))}</td><td>{n(r.get('satOnly'))}</td>
+        <td>{n(r.get('axleErr'))}</td><td>{_html_escape(r.get('discrepancyRate') or 0)}%</td></tr>"""
+        for r in rows[:40]
+    )
+    html = f"""<!doctype html><html><head><meta charset="utf-8"/><title>{_html_escape(form.get('name') or form.get('type') or 'AG-metrics Report')}</title>
+<style>
+*{{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}body{{font-family:Arial,Helvetica,sans-serif;color:#111827;margin:0;background:#f3f6fb}}.page{{max-width:1080px;margin:0 auto;background:#fff;min-height:100vh;padding:30px 34px 36px}}.header{{display:grid;grid-template-columns:170px 1fr auto;gap:22px;align-items:center;border-bottom:3px solid #111827;padding-bottom:20px}}.logo-box{{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff;display:flex;align-items:center;justify-content:center;min-height:86px}}.logo{{max-width:138px;max-height:64px;object-fit:contain}}.brand{{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:#64748b;font-weight:700}}h1{{margin:5px 0 6px;font-size:25px}}.meta{{color:#64748b;font-size:12px;line-height:1.55}}.badge{{display:inline-block;background:#eaf1ff;color:#2f5fb7;border:1px solid #c7d8ff;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700}}.kpis{{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0}}.kpi{{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff}}.kpi span{{display:block;color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px}}.kpi strong{{display:block;font-size:22px;margin-top:5px}}.good strong{{color:#14965a}}.warn strong{{color:#b88900}}.bad strong{{color:#d92d53}}.info strong{{color:#2f5fb7}}.summary{{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin:18px 0}}.summary-card{{border:1px solid #dbe3ef;border-radius:10px;padding:13px 15px;background:#fbfdff}}.summary-card h2{{font-size:13px;margin:0 0 8px}}.summary-card p{{margin:4px 0;color:#475569;font-size:12px}}.section{{margin-top:24px;border:1px solid #dbe3ef;border-radius:10px;padding:16px;background:#fff}}.section h2{{font-size:15px;margin:0 0 12px}}.legend{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:11px;color:#475569}}.dot{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}}.matched-dot{{background:#22c97b}}.avc-dot{{background:#ff7e3f}}.sat-dot{{background:#5b9cf6}}.axle-dot{{background:#f5d433}}.bar-row{{display:grid;grid-template-columns:145px 1fr 58px;gap:10px;align-items:center;margin:10px 0;font-size:11px}}.bar-label strong{{display:block}}.bar-label span{{display:block;color:#64748b;margin-top:2px}}.bar-shell{{height:18px;background:#eef2f7;border-radius:999px;overflow:hidden;display:flex;min-width:32px}}.seg{{height:18px}}.matched{{background:#22c97b}}.avc{{background:#ff7e3f}}.sat{{background:#5b9cf6}}.axle{{background:#f5d433}}table{{width:100%;border-collapse:separate;border-spacing:0;margin-top:10px;font-size:11px;border:1px solid #dbe3ef;border-radius:8px}}th,td{{padding:8px 9px;text-align:left;border-bottom:1px solid #e5eaf2}}th{{background:#f1f5f9;color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:.45px}}.footer{{display:flex;justify-content:space-between;margin-top:24px;color:#64748b;font-size:10px;border-top:1px solid #dbe3ef;padding-top:12px}}@page{{margin:12mm}}@media print{{body{{background:#fff}}.page{{padding:18px;max-width:none}}.section,.kpis{{break-inside:avoid}}}}
+</style></head><body><div class="page">
+<div class="header"><div class="logo-box"><img class="logo" src="{logo_data}" alt="AG Holdings"/></div><div><div class="brand">AG-metrics Toll Audit Platform</div><h1>{_html_escape(form.get('name') or form.get('type') or 'AG-metrics Report')}</h1><div class="meta">{_html_escape(form.get('plaza') or '')} · {_html_escape(form.get('type') or '')}<br/>{_html_escape(report.get('date_from'))} to {_html_escape(report.get('date_to'))} · Generated {_html_escape(_now())}</div></div><div><span class="badge">{_html_escape(form.get('template') or 'Standard PDF')}</span></div></div>
+<div class="kpis"><div class="kpi info"><span>Total events</span><strong>{n(totals['total'])}</strong></div><div class="kpi good"><span>Matched</span><strong>{n(totals['matched'])}</strong></div><div class="kpi bad"><span>Discrepancies</span><strong>{n(totals['discrepancy'])}</strong></div><div class="kpi info"><span>Detection rate</span><strong>{totals['matchRate']}%</strong></div><div class="kpi warn"><span>Axle errors</span><strong>{n(totals['axleErr'])}</strong></div><div class="kpi bad"><span>Class mismatch</span><strong>{n(totals['classMismatch'])}</strong></div></div>
+<div class="summary"><div class="summary-card"><h2>Report scope</h2><p><strong>Lanes:</strong> {_html_escape(', '.join(lanes) if lanes else 'All available lanes')}</p><p><strong>Frequency:</strong> {_html_escape(form.get('frequency') or 'Manual only')}</p><p><strong>Recipients:</strong> {_html_escape(', '.join(form.get('recipients') or []) or form.get('contact_group') or 'Not configured')}</p></div><div class="summary-card"><h2>Included sections</h2><p>KPI indicators</p><p>Lane/day discrepancy chart</p><p>Detail table with reconciliation totals</p></div></div>
+<div class="section"><h2>Results by lane and day</h2><div class="legend"><span><i class="dot matched-dot"></i>Matched</span><span><i class="dot avc-dot"></i>AVC only</span><span><i class="dot sat-dot"></i>SAT only</span><span><i class="dot axle-dot"></i>Axle errors</span></div>{''.join(chart_rows) or '<p class="meta">No data available</p>'}</div>
+<div class="section"><h2>Detail table</h2><table><thead><tr><th>Date</th><th>Lane</th><th>Total</th><th>Matched</th><th>AVC only</th><th>SAT only</th><th>Axle errors</th><th>Discrepancy rate</th></tr></thead><tbody>{table_rows}</tbody></table></div>
+<div class="footer"><span>AG-metrics · AVC/SAT Audit Report</span><span>{_html_escape(form.get('template') or 'Standard PDF')}</span></div></div></body></html>"""
+    return html.encode("utf-8")
+
+
+def _pdf_escape(value: Any) -> str:
+    return str(value if value is not None else "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _jpeg_dimensions(data: bytes) -> Optional[tuple]:
+    try:
+        i = 2
+        while i < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            length = int.from_bytes(data[i + 2:i + 4], "big")
+            if marker in (0xC0, 0xC2):
+                h = int.from_bytes(data[i + 5:i + 7], "big")
+                w = int.from_bytes(data[i + 7:i + 9], "big")
+                return w, h
+            i += 2 + length
+    except Exception:
+        return None
+    return None
+
+
+def _designed_report_pdf_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> bytes:
+    lang_raw = str(form.get("language") or "").lower()
+    if not lang_raw:
+        cfg = load_saved_settings()
+        lang_raw = str(cfg.get("ui_language") or "").lower()
+    spanish = lang_raw.startswith("es") or "spanish" in lang_raw or "español" in lang_raw
+    labels = {
+        "brand": "Plataforma de Auditoría AG-metrics" if spanish else "AG-metrics Toll Audit Platform",
+        "generated": "Generado" if spanish else "Generated",
+        "total": "Eventos totales" if spanish else "Total events",
+        "matched": "Coincidencias" if spanish else "Matched",
+        "discrepancies": "Discrepancias" if spanish else "Discrepancies",
+        "detection": "Tasa de detección" if spanish else "Detection rate",
+        "axle": "Errores de ejes" if spanish else "Axle errors",
+        "class": "Clase distinta" if spanish else "Class mismatch",
+        "scope": "Alcance del reporte" if spanish else "Report scope",
+        "lanes": "Carriles" if spanish else "Lanes",
+        "all_lanes": "Todos los carriles disponibles" if spanish else "All available lanes",
+        "frequency": "Frecuencia" if spanish else "Frequency",
+        "manual": "Solo manual" if spanish else "Manual only",
+        "results": "Resultados por carril y día" if spanish else "Results by lane and day",
+        "avc_only": "Solo AVC" if spanish else "AVC only",
+        "sat_only": "Solo SAT" if spanish else "SAT only",
+        "detail": "Tabla de detalle" if spanish else "Detail table",
+        "date": "Fecha" if spanish else "Date",
+        "lane": "Carril" if spanish else "Lane",
+        "match": "Match" if spanish else "Match",
+        "footer": "AG-metrics - Reporte de Auditoría AVC/SAT" if spanish else "AG-metrics - AVC/SAT Audit Report",
+    }
+    lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
+    rows = [r for r in report.get("rows", []) if not lanes or r.get("lane") in lanes]
+    rows = _report_rows_for_type(rows, form.get("type") or "")
+    totals = {
+        "total": sum(int(r.get("total") or 0) for r in rows),
+        "matched": sum(int(r.get("matched") or 0) for r in rows),
+        "avcOnly": sum(int(r.get("avcOnly") or 0) for r in rows),
+        "satOnly": sum(int(r.get("satOnly") or 0) for r in rows),
+        "axleErr": sum(int(r.get("axleErr") or 0) for r in rows),
+        "classMismatch": sum(int(r.get("classMismatch") or 0) for r in rows),
+    }
+    totals["discrepancy"] = totals["avcOnly"] + totals["satOnly"] + totals["axleErr"]
+    totals["matchRate"] = round((totals["total"] - totals["satOnly"]) / max(totals["total"], 1) * 100, 1)
+    max_total = max([int(r.get("total") or 0) for r in rows] or [1])
+
+    def n(value: Any) -> str:
+        try:
+            return f"{int(value):,}"
+        except Exception:
+            return str(value or 0)
+
+    cmds: List[str] = []
+
+    def fill(r: float, g: float, b: float, x: float, y: float, w: float, h: float) -> None:
+        cmds.append(f"{r} {g} {b} rg {x} {y} {w} {h} re f")
+
+    def text(value: Any, x: float, y: float, size: int = 10, color=(0.07, 0.09, 0.14), font="F1") -> None:
+        r, g, b = color
+        cmds.append(f"{r} {g} {b} rg BT /{font} {size} Tf {x} {y} Td ({_pdf_escape(value)}) Tj ET")
+
+    image_bytes = b""
+    image_dims = None
+    logo_path = os.path.join(BASE_DIR, "frontend", "logo.jpeg")
+    try:
+        with open(logo_path, "rb") as fh:
+            image_bytes = fh.read()
+        image_dims = _jpeg_dimensions(image_bytes)
+    except Exception:
+        image_bytes = b""
+
+    fill(0.96, 0.98, 1.0, 0, 0, 612, 792)
+    fill(1, 1, 1, 32, 28, 548, 736)
+    fill(0.07, 0.09, 0.14, 32, 675, 548, 3)
+    fill(1, 1, 1, 42, 692, 120, 54)
+    if image_bytes and image_dims:
+        iw, ih = image_dims
+        ratio = min(108 / iw, 42 / ih)
+        w, h = iw * ratio, ih * ratio
+        cmds.append(f"q {w:.2f} 0 0 {h:.2f} {48 + (108 - w) / 2:.2f} {698 + (42 - h) / 2:.2f} cm /Im1 Do Q")
+    else:
+        text("AG-metrics", 58, 715, 16, (0.18, 0.37, 0.72))
+    text(labels["brand"], 178, 735, 9, (0.39, 0.45, 0.55))
+    text(form.get("name") or form.get("type") or "AG-metrics Report", 178, 712, 19)
+    text(f"{form.get('plaza') or ''}  |  {form.get('type') or ''}", 178, 694, 10, (0.39, 0.45, 0.55))
+    connector = "a" if spanish else "to"
+    text(f"{report.get('date_from')} {connector} {report.get('date_to')}  |  {labels['generated']} {_now()}", 178, 680, 9, (0.39, 0.45, 0.55))
+    fill(0.92, 0.95, 1.0, 465, 715, 82, 18)
+    text(form.get("template") or "Standard PDF", 472, 721, 8, (0.18, 0.37, 0.72))
+
+    kpis = [
+        (labels["total"], n(totals["total"]), (0.18, 0.37, 0.72)),
+        (labels["matched"], n(totals["matched"]), (0.08, 0.59, 0.35)),
+        (labels["discrepancies"], n(totals["discrepancy"]), (0.85, 0.18, 0.33)),
+        (labels["detection"], f"{totals['matchRate']}%", (0.18, 0.37, 0.72)),
+        (labels["axle"], n(totals["axleErr"]), (0.72, 0.54, 0.0)),
+        (labels["class"], n(totals["classMismatch"]), (0.85, 0.18, 0.33)),
+    ]
+    for idx, (label, value, color) in enumerate(kpis):
+        col, row = idx % 3, idx // 3
+        x, y = 46 + col * 174, 616 - row * 56
+        fill(1, 1, 1, x, y, 158, 42)
+        fill(0.86, 0.89, 0.94, x, y, 158, 0.8)
+        text(label.upper(), x + 10, y + 27, 7, (0.39, 0.45, 0.55))
+        text(value, x + 10, y + 9, 16, color)
+
+    fill(0.98, 0.99, 1.0, 46, 490, 502, 46)
+    text(labels["scope"], 58, 518, 10)
+    text(f"{labels['lanes']}: {', '.join(lanes) if lanes else labels['all_lanes']}", 58, 503, 8, (0.29, 0.33, 0.41))
+    text(f"{labels['frequency']}: {form.get('frequency') or labels['manual']}", 320, 503, 8, (0.29, 0.33, 0.41))
+
+    text(labels["results"], 46, 465, 12)
+    legend = [(labels["matched"], (0.13, 0.79, 0.48)), (labels["avc_only"], (1.0, 0.49, 0.25)), (labels["sat_only"], (0.36, 0.61, 0.96)), (labels["axle"], (0.96, 0.83, 0.20))]
+    lx = 46
+    for label, color in legend:
+        fill(*color, lx, 445, 8, 8)
+        text(label, lx + 12, 446, 7, (0.29, 0.33, 0.41))
+        lx += 82
+
+    y = 420
+    for r in rows[:10]:
+        total = max(int(r.get("total") or 0), 1)
+        bar_w = max(12, int(r.get("total") or 0) / max(max_total, 1) * 320)
+        text(f"{r.get('lane')} {r.get('date')}", 46, y + 4, 7, (0.29, 0.33, 0.41))
+        x = 190
+        for key, color in [("matched", (0.13, 0.79, 0.48)), ("avcOnly", (1.0, 0.49, 0.25)), ("satOnly", (0.36, 0.61, 0.96)), ("axleErr", (0.96, 0.83, 0.20))]:
+            value = int(r.get(key) or 0)
+            seg_w = max(2 if value else 0, value / total * bar_w)
+            if seg_w:
+                fill(*color, x, y, seg_w, 10)
+                x += seg_w
+        text(n(r.get("total")), 525, y + 2, 7)
+        y -= 18
+
+    text(labels["detail"], 46, 230, 12)
+    headers = [labels["date"], labels["lane"], "Total", labels["match"], "AVC", "SAT", "Ejes", "% Disc."]
+    widths = [60, 118, 45, 45, 45, 45, 45, 55]
+    x = 46
+    fill(0.95, 0.96, 0.98, 46, 210, 468, 16)
+    for h, w in zip(headers, widths):
+        text(h, x + 3, 216, 7, (0.29, 0.33, 0.41))
+        x += w
+    y = 195
+    for r in rows[:11]:
+        x = 46
+        vals = [r.get("date"), r.get("lane"), n(r.get("total")), n(r.get("matched")), n(r.get("avcOnly")), n(r.get("satOnly")), n(r.get("axleErr")), f"{r.get('discrepancyRate') or 0}%"]
+        for val, w in zip(vals, widths):
+            text(str(val)[:22], x + 3, y, 7, (0.11, 0.15, 0.22))
+            x += w
+        y -= 14
+    text(labels["footer"], 46, 46, 8, (0.39, 0.45, 0.55))
+
+    stream = "\n".join(cmds).encode("latin-1", errors="replace")
+    resources = "/Font << /F1 4 0 R >>"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        None,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    if image_bytes and image_dims:
+        iw, ih = image_dims
+        resources = "/Font << /F1 4 0 R >> /XObject << /Im1 6 0 R >>"
+        objects.append(
+            b"<< /Type /XObject /Subtype /Image /Width " + str(iw).encode() +
+            b" /Height " + str(ih).encode() +
+            b" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + str(len(image_bytes)).encode() +
+            b" >>\nstream\n" + image_bytes + b"\nendstream"
+        )
+    objects[2] = f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {resources} >> /Contents 5 0 R >>".encode()
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{idx} 0 obj\n".encode())
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode())
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode())
+    pdf.extend(f"trailer << /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return bytes(pdf)
+
+
 def _smtp_error_msg(exc: Exception) -> str:
     """Traduce excepciones SMTP/SSL/red a mensajes legibles en español."""
     import socket
@@ -611,7 +981,8 @@ def _smtp_error_msg(exc: Exception) -> str:
 
 
 def _send_report_email(settings: Dict[str, Any], recipients: List[str], subject: str,
-                       body: str, pdf_name: str, pdf_bytes: bytes) -> None:
+                       body: str, pdf_name: str, pdf_bytes: bytes,
+                       attachment_subtype: str = "pdf") -> None:
     smtp = settings.get("smtp") or {}
     host = str(smtp.get("host") or "").strip()
     if not host:
@@ -627,7 +998,8 @@ def _send_report_email(settings: Dict[str, Any], recipients: List[str], subject:
     msg["From"] = f"{smtp.get('from_name') or 'AG-metrics'} <{from_email}>"
     msg["To"] = ", ".join(recipients)
     msg.set_content(body)
-    msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_name)
+    maintype = "text" if attachment_subtype == "html" else "application"
+    msg.add_attachment(pdf_bytes, maintype=maintype, subtype=attachment_subtype, filename=pdf_name)
 
     username = smtp.get("username") or ""
     password = smtp.get("password") or ""
@@ -1447,20 +1819,25 @@ async def send_test_report_email(request: Request, user=Depends(_require_admin))
         "worst_rows": [],
         "rows": [],
     })
+    subject = "AG-metrics - prueba SMTP"
     try:
         loop = asyncio.get_event_loop()
         await asyncio.wait_for(
             loop.run_in_executor(None, lambda: _send_report_email(
-                settings, [to_email], "AG-metrics - prueba SMTP",
+                settings, [to_email], subject,
                 "Este es un correo de prueba de configuración SMTP de AG-metrics.",
                 "ag-metrics-prueba.pdf", pdf,
             )),
             timeout=20.0,
         )
+        _record_notification("System", "SMTP test", subject, [to_email], "Sent")
     except asyncio.TimeoutError:
+        _record_notification("System", "SMTP test", subject, [to_email], "Failed", "Timeout SMTP 20s")
         raise HTTPException(400, "Timeout: el servidor SMTP no respondió en 20 segundos — verifica host y puerto")
     except Exception as exc:
-        raise HTTPException(400, _smtp_error_msg(exc))
+        msg = _smtp_error_msg(exc)
+        _record_notification("System", "SMTP test", subject, [to_email], "Failed", msg)
+        raise HTTPException(400, msg)
     return {"ok": True, "sent_to": to_email}
 
 
@@ -1485,11 +1862,269 @@ async def send_report_now(request: Request, user=Depends(_require_admin)):
             loop.run_in_executor(None, lambda: _send_configured_report(report_type, date_from, date_to)),
             timeout=20.0,
         )
+        period = f"{date_from} a {date_to}"
+        pdf_file = f"ag-metrics-{report_type}-{date_from}-{date_to}.pdf"
+        subject = f"Reporte AG-metrics {report_type.upper()} | {period}"
+        recipients = result.get("recipients") or []
+        _record_report_history(f"Reporte {report_type}", period, recipients, "Sent", pdf_file)
+        _record_notification("Report", f"Reporte {report_type}", subject, recipients, "Sent")
         return result
     except asyncio.TimeoutError:
+        _record_report_history(f"Reporte {report_type}", f"{date_from} a {date_to}", [], "Failed", "", "Timeout SMTP 20s")
+        _record_notification("Report", f"Reporte {report_type}", f"Reporte AG-metrics {report_type.upper()}", [], "Failed", "Timeout SMTP 20s")
         raise HTTPException(400, "Timeout: el servidor SMTP no respondió en 20 segundos — verifica host y puerto")
     except Exception as exc:
-        raise HTTPException(400, _smtp_error_msg(exc))
+        msg = _smtp_error_msg(exc)
+        _record_report_history(f"Reporte {report_type}", f"{date_from} a {date_to}", [], "Failed", "", msg)
+        _record_notification("Report", f"Reporte {report_type}", f"Reporte AG-metrics {report_type.upper()}", [], "Failed", msg)
+        raise HTTPException(400, msg)
+
+
+@app.post("/api/report-email/send-preview")
+async def send_preview_report_email(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    form = body.get("report") or {}
+    recipients = [
+        str(r).strip() for r in (form.get("recipients") or body.get("recipients") or [])
+        if str(r).strip()
+    ]
+    if not recipients and isinstance(form.get("recipients"), str):
+        recipients = [r.strip() for r in form["recipients"].split(",") if r.strip()]
+    if not recipients:
+        raise HTTPException(400, "Agrega destinatarios antes de enviar el reporte de prueba")
+    invalid = [r for r in recipients if not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', r)]
+    if invalid:
+        raise HTTPException(400, f"Correo inválido: {invalid[0]}")
+
+    date_from = body.get("date_from") or date.today().isoformat()
+    date_to = body.get("date_to") or date_from
+    settings = _report_email_settings()
+    report = get_reports_summary(date_from, date_to, user={"id": 0})
+    pdf = _designed_report_pdf_bytes({**form, "recipients": recipients}, report)
+    title = form.get("name") or form.get("type") or "AG-metrics Report"
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", title).strip("-").lower() or "ag-metrics-report"
+    filename = f"{safe_name}-{date_from}-{date_to}.pdf"
+    subject = f"{title} | {date_from} a {date_to}"
+    try:
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _send_report_email(
+                settings,
+                recipients,
+                subject,
+                "Adjunto encontrarás el reporte de prueba generado desde la vista previa de AG-metrics.",
+                filename,
+                pdf,
+                "pdf",
+            )),
+            timeout=20.0,
+        )
+        _record_report_history(title, f"{date_from} a {date_to}", recipients, "Sent", filename)
+        _record_notification("Report", title, subject, recipients, "Sent")
+        return {"ok": True, "sent": len(recipients), "recipients": recipients, "filename": filename}
+    except asyncio.TimeoutError:
+        _record_report_history(title, f"{date_from} a {date_to}", recipients, "Failed", filename, "Timeout SMTP 20s")
+        _record_notification("Report", title, subject, recipients, "Failed", "Timeout SMTP 20s")
+        raise HTTPException(400, "Timeout: el servidor SMTP no respondió en 20 segundos — verifica host y puerto")
+    except Exception as exc:
+        msg = _smtp_error_msg(exc)
+        _record_report_history(title, f"{date_from} a {date_to}", recipients, "Failed", filename, msg)
+        _record_notification("Report", title, subject, recipients, "Failed", msg)
+        raise HTTPException(400, msg)
+
+
+@app.get("/api/report-configs")
+def get_report_configs(user=Depends(_require_admin)):
+    return _setting_list("report_configs")
+
+
+@app.post("/api/report-configs")
+async def save_report_config(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    return _upsert_setting_row("report_configs", body)
+
+
+@app.get("/api/report-settings")
+def get_report_settings(user=Depends(_require_admin)):
+    return _get_app_setting_json("report_settings", {
+        "timezone": "America/Mexico_City",
+        "default_template": "Standard PDF",
+        "language": "English",
+        "attach_pdf": True,
+        "footer_text": "Generated by AG-metrics",
+    })
+
+
+@app.post("/api/report-settings")
+async def save_report_settings(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    _set_app_setting_json("report_settings", body)
+    return {"ok": True}
+
+
+@app.get("/api/report-templates")
+def get_report_templates(user=Depends(_require_admin)):
+    default_template = {
+        "id": 1,
+        "name": "Standard PDF",
+        "logo": "",
+        "header_text": "AG-metrics Toll Audit",
+        "footer_text": "Generated by AG-metrics",
+        "language": "English",
+        "is_default": True,
+        "status": "Active",
+    }
+    rows = [r for r in _setting_list("report_templates") if str(r.get("name") or "").strip()]
+    has_standard = any(r.get("name") == default_template["name"] for r in rows)
+    if not has_standard:
+        rows.insert(0, default_template)
+    if not any(r.get("is_default") for r in rows):
+        rows[0]["is_default"] = True
+    return rows
+
+
+@app.post("/api/report-templates")
+async def save_report_template(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    rows = _setting_list("report_templates")
+    if body.get("is_default"):
+        rows = [{**r, "is_default": False} for r in rows]
+        _save_setting_list("report_templates", rows)
+    return _upsert_setting_row("report_templates", body)
+
+
+@app.get("/api/report-history")
+def get_report_history(user=Depends(_require_admin)):
+    return _setting_list("report_history")
+
+
+@app.get("/api/contact-groups")
+def get_contact_groups(user=Depends(_require_admin)):
+    rows = _setting_list("contact_groups")
+    if rows:
+        return rows
+    return [
+        {"id": 1, "name": "Toll Audit Team", "description": "Daily audit recipients", "emails": [], "status": "Active"},
+        {"id": 2, "name": "Operations Team", "description": "Operations notifications", "emails": [], "status": "Active"},
+        {"id": 3, "name": "Management", "description": "Management summaries", "emails": [], "status": "Active"},
+        {"id": 4, "name": "IT Support", "description": "System support contacts", "emails": [], "status": "Active"},
+    ]
+
+
+@app.post("/api/contact-groups")
+async def save_contact_group(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    return _upsert_setting_row("contact_groups", body)
+
+
+@app.get("/api/notification-history")
+def get_notification_history(user=Depends(_require_admin)):
+    return _setting_list("notification_history")
+
+
+@app.get("/api/alarm-rules")
+def get_alarm_rules(user=Depends(_require_admin)):
+    return _setting_list("alarm_rules")
+
+
+@app.post("/api/alarm-rules")
+async def save_alarm_rule(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    return _upsert_setting_row("alarm_rules", body)
+
+
+@app.get("/api/active-alarms")
+def get_active_alarms(user=Depends(_require_admin)):
+    rows = _setting_list("active_alarms")
+    return [r for r in rows if r.get("status", "Open") not in ("Resolved", "Ignored")]
+
+
+@app.post("/api/active-alarms")
+async def save_active_alarm(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    saved = _upsert_setting_row("active_alarms", body)
+    if saved.get("status") in ("Resolved", "Ignored"):
+        _append_setting_row("alarm_history", saved)
+    return saved
+
+
+@app.get("/api/alarm-settings")
+def get_alarm_settings(user=Depends(_require_admin)):
+    return _get_app_setting_json("alarm_settings", {
+        "default_severity": "Warning",
+        "default_cooldown": 10,
+        "emails_enabled": True,
+        "critical_group": "",
+        "history_days": 90,
+    })
+
+
+@app.post("/api/alarm-settings")
+async def save_alarm_settings(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    _set_app_setting_json("alarm_settings", body)
+    return {"ok": True}
+
+
+@app.get("/api/alarm-history")
+def get_alarm_history(user=Depends(_require_admin)):
+    return _setting_list("alarm_history")
+
+
+@app.post("/api/alarm-email/test")
+async def send_test_alarm_email(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    settings = _report_email_settings()
+    recipients = [e.strip() for e in (body.get("recipients") or []) if str(e).strip()]
+    if not recipients:
+        to_email = (user.get("email") or settings["smtp"].get("from_email") or "").strip()
+        recipients = [to_email] if to_email else []
+    if not recipients:
+        raise HTTPException(400, "Sin destinatarios para prueba de alarma")
+    alarm_name = body.get("alarm_name") or "Test alarm"
+    subject = f"AG-metrics Alarm - {alarm_name}"
+    pdf = _report_pdf_bytes(subject, {
+        "date_from": date.today().isoformat(),
+        "date_to": date.today().isoformat(),
+        "source": "alarm-test",
+        "totals": {"total": 0, "matched": 0, "avcOnly": 0, "satOnly": 0, "axleErr": 0, "matchRate": 0, "discrepancyCount": 0, "discrepancyRate": 0},
+        "motive_breakdown": [],
+        "worst_rows": [],
+        "rows": [],
+    })
+    try:
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _send_report_email(
+                settings,
+                recipients,
+                subject,
+                "This is a test alarm notification from AG-metrics.",
+                "ag-metrics-alarm-test.pdf",
+                pdf,
+            )),
+            timeout=20.0,
+        )
+        _record_notification("Alarm", alarm_name, subject, recipients, "Sent")
+        _append_setting_row("alarm_history", {
+            "date_time": _now(),
+            "alarm_name": alarm_name,
+            "event_type": body.get("event_type") or "Test Rule",
+            "plaza": body.get("plaza") or "",
+            "lane": "",
+            "severity": body.get("severity") or "Info",
+            "status": "Resolved",
+            "notification_status": "Sent",
+            "resolved_at": _now(),
+        })
+        return {"ok": True, "sent_to": recipients}
+    except asyncio.TimeoutError:
+        _record_notification("Alarm", alarm_name, subject, recipients, "Failed", "Timeout SMTP 20s")
+        raise HTTPException(400, "Timeout: el servidor SMTP no respondió en 20 segundos — verifica host y puerto")
+    except Exception as exc:
+        msg = _smtp_error_msg(exc)
+        _record_notification("Alarm", alarm_name, subject, recipients, "Failed", msg)
+        raise HTTPException(400, msg)
 
 
 # ─────────────────────────────────────────────────────────

@@ -659,6 +659,7 @@ function SistemaConfig() {
   ];
 
   const [timezone,    setTimezone]    = React.useState("America/Mexico_City");
+  const [uiLanguage,  setUiLanguage]  = React.useState(window.getUILanguage ? window.getUILanguage() : "es");
   const [laneMapping, setLaneMapping] = React.useState({});
   const [avcLanes,    setAvcLanes]    = React.useState([]);   // todos los carriles AVC conocidos
   const [satVoies,    setSatVoies]    = React.useState([]);   // todos los voies SAT de MERGED
@@ -673,6 +674,10 @@ function SistemaConfig() {
     // 1. Config guardada (timezone + lane_mapping)
     window.API.get("/api/config").then(cfg=>{
       if (cfg.timezone) setTimezone(cfg.timezone);
+      if (cfg.ui_language) {
+        setUiLanguage(cfg.ui_language);
+        localStorage.setItem("agm_ui_language", cfg.ui_language);
+      }
       try {
         const m = cfg.lane_mapping
           ? (typeof cfg.lane_mapping==="string" ? JSON.parse(cfg.lane_mapping) : cfg.lane_mapping)
@@ -721,10 +726,14 @@ function SistemaConfig() {
     );
     window.API.get("/api/config")
       .then(cfg=>window.API.post("/api/config",{
-        ...cfg, timezone,
+        ...cfg, timezone, ui_language: uiLanguage,
         lane_mapping: JSON.stringify(cleanMapping),
       }))
-      .then(()=>{ setSaveMsg("✓ Guardado"); setTimeout(()=>setSaveMsg(""),3000); })
+      .then(()=>{
+        localStorage.setItem("agm_ui_language", uiLanguage);
+        window.dispatchEvent(new CustomEvent("agm-language-change", {detail:{language:uiLanguage}}));
+        setSaveMsg("✓ Guardado"); setTimeout(()=>setSaveMsg(""),3000);
+      })
       .catch(()=>setSaveMsg("Error al guardar"))
       .finally(()=>setSaving(false));
   }
@@ -954,9 +963,23 @@ function ReportEmailSettings() {
             <label style={cfgStyles.label}>Seguridad</label>
             <select value={settings.smtp.security||"TLS"} onChange={e=>setSmtp("security",e.target.value)} style={cfgStyles.select}>
               <option value="TLS">TLS</option><option value="SSL">SSL</option><option value="None">None</option>
-            </select>
-          </div>
+          </select>
         </div>
+      </div>
+
+      <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
+        <div style={{fontSize:13,fontWeight:600,color:"#e8edf5",marginBottom:6}}>Idioma de la plataforma / Platform language</div>
+        <div style={{fontSize:12,color:"#5b6a8a",marginBottom:14}}>
+          Cambia las etiquetas principales de la plataforma entre español e inglés. No modifica datos, reportes ni lógica del sistema.
+        </div>
+        <div style={{maxWidth:300}}>
+          <label style={cfgStyles.label}>Idioma / Language</label>
+          <select value={uiLanguage} onChange={e=>setUiLanguage(e.target.value)} style={cfgStyles.select}>
+            <option value="es">Español</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+      </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 14px"}}>
           <FormField label="SMTP username" value={settings.smtp.username||""} onChange={v=>setSmtp("username",v)}/>
           <FormField label="SMTP password" value={settings.smtp.password||""} onChange={v=>setSmtp("password",v)} masked/>
@@ -1055,7 +1078,7 @@ function ReportEmailSettings() {
 
       <div style={{display:"flex",gap:12,alignItems:"center"}}>
         <button onClick={save} disabled={saving} style={{...cfgStyles.saveBtn,opacity:saving?0.7:1}}>
-          {saving?"Guardando...":"Guardar Report Email Settings"}
+          {saving?"Guardando...":"Guardar configuración"}
         </button>
         {msg && <span style={{fontSize:12,color:msg.includes("Error")?"#ff4c6a":"#22c97b"}}>{msg}</span>}
       </div>
@@ -1066,14 +1089,14 @@ function ReportEmailSettings() {
 const CONFIG_TABS = [
   { id:"fuentes", label:"Fuentes AVC",          icon:"📡" },
   { id:"sat",     label:"Integración SAT",      icon:"💳" },
-  { id:"report_email", label:"Report Email Settings", icon:"✉️" },
   { id:"sistema", label:"Sistema",              icon:"⚙️" },
   { id:"users",   label:"Usuarios y Permisos",  icon:"👥" },
 ];
 
 function ConfigScreen() {
   const [activeTab, setActiveTab] = React.useState("fuentes");
-  const tabContent = { fuentes:<AVCSourcesConfig/>, sat:<SATConfig/>, report_email:<ReportEmailSettings/>, sistema:<SistemaConfig/>, users:<UsersConfig/> };
+  const tabContent = { fuentes:<AVCSourcesConfig/>, sat:<SATConfig/>, sistema:<SistemaConfig/>, users:<UsersConfig/> };
+  const tr = window.t || (v => v);
 
   return (
     <div style={{display:"flex", gap:0, height:"100%"}}>
@@ -1089,19 +1112,18 @@ function ConfigScreen() {
             fontSize:13, textAlign:"left", transition:"all 0.15s",
           }}>
             <span>{t.icon}</span>
-            {t.label}
+            {tr(t.label)}
           </button>
         ))}
       </div>
       {/* Content */}
       <div style={{flex:1, padding:"28px 32px", overflowY:"auto"}}>
         <div style={{fontSize:16, fontWeight:700, color:"#e8edf5", marginBottom:6}}>
-          {CONFIG_TABS.find(t=>t.id===activeTab)?.label}
+          {tr(CONFIG_TABS.find(t=>t.id===activeTab)?.label || "")}
         </div>
         <div style={{fontSize:12, color:"#5b6a8a", marginBottom:24}}>
           {activeTab==="fuentes"&&"Sistemas AVC conectados — PostgreSQL/SSH o Alice API REST"}
           {activeTab==="sat"&&"Fuente de datos del Sistema de Administración de Tráfico"}
-          {activeTab==="report_email"&&"SMTP, destinatarios y programación automática de reportes PDF"}
           {activeTab==="sistema"&&"Zona horaria, mapeo de carriles AVC ↔ SAT y parámetros globales"}
           {activeTab==="users"&&"Gestión de usuarios y niveles de acceso"}
         </div>

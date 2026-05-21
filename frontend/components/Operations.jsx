@@ -1,0 +1,784 @@
+// Operations modules — reports, alarms, notifications, and global settings
+const REPORT_TYPES = [
+  {id:"daily", label:"Daily Toll Audit Report", help:"Resumen operativo diario por plaza y carriles seleccionados."},
+  {id:"comparison", label:"SAT vs AG-Metrics Comparison", help:"Compara transacciones SAT contra detecciones AG-Metrics."},
+  {id:"axle", label:"Axle Count Discrepancy Report", help:"Enfocado en diferencias de ejes entre AVC y SAT."},
+  {id:"class", label:"Vehicle Classification Mismatch Report", help:"Muestra diferencias entre clase detectada y clase cobrada."},
+  {id:"evasion", label:"Possible Evasion Report", help:"Lista eventos con detección sin transacción SAT asociada."},
+];
+const REPORT_PERIODS = [
+  {id:"Previous hour", help:"Usa la última hora cerrada para revisión rápida."},
+  {id:"Previous day", help:"Opción recomendada para reportes operativos diarios."},
+  {id:"Previous week", help:"Agrupa los últimos 7 días cerrados."},
+  {id:"Custom date range", help:"Permite definir el período al generar el reporte."},
+];
+const FREQUENCIES = [
+  {id:"Manual only", help:"No se envía automáticamente; el usuario lo genera cuando lo necesite."},
+  {id:"Hourly", help:"Útil para monitoreo frecuente de discrepancias."},
+  {id:"Daily", help:"Recomendado para cierre diario de auditoría."},
+  {id:"Weekly", help:"Resumen ejecutivo semanal."},
+];
+const ALARM_EVENTS = [
+  "Axle count mismatch",
+  "Vehicle classification mismatch",
+  "Possible evasion",
+  "Missing SAT transaction",
+  "Duplicate transaction",
+  "Low confidence detection",
+  "SAT batch file not received",
+  "Batch import failed",
+  "High mismatch rate",
+];
+const TRIGGER_EXAMPLES = [
+  "AG-Metrics axle count is different from SAT axle count",
+  "Axle count difference is greater than or equal to 1",
+  "Vehicle detected but no SAT transaction exists within +/- 10 seconds",
+  "AG-Metrics vehicle class is different from SAT vehicle class",
+  "Detection confidence is below 75%",
+  "No SAT batch file received in the last 10 minutes",
+  "Mismatch rate is greater than 5% during the last hour",
+];
+
+function opToday() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function opFetchAll(loaders) {
+  return Promise.all(loaders.map(([url, setter]) => window.API.get(url).then(setter).catch(() => setter([]))));
+}
+
+function OpField({ label, value, onChange, type = "text", options, placeholder, rows }) {
+  const tr = window.t || (v => v);
+  return (
+    <div style={opStyles.field}>
+      <label style={opStyles.label}>{tr(label)}</label>
+      {options ? (
+        <select value={value || ""} onChange={e => onChange(e.target.value)} style={opStyles.input}>
+          {options.map(o => <option key={o} value={o}>{tr(o)}</option>)}
+        </select>
+      ) : rows ? (
+        <textarea value={value || ""} onChange={e => onChange(e.target.value)} placeholder={tr(placeholder || "")} rows={rows} style={{...opStyles.input, resize:"vertical"}}/>
+      ) : (
+        <input type={type} value={value || ""} onChange={e => onChange(type === "checkbox" ? e.target.checked : e.target.value)}
+          placeholder={tr(placeholder || "")} style={type === "checkbox" ? opStyles.checkbox : opStyles.input}/>
+      )}
+    </div>
+  );
+}
+
+function optionIds(options) {
+  return options.map(o => typeof o === "string" ? o : o.id);
+}
+
+function optionHelp(options, value) {
+  const found = options.find(o => typeof o !== "string" && o.id === value);
+  return found ? found.help : "";
+}
+
+function OpHint({ children }) {
+  if (!children) return null;
+  return <div style={opStyles.hint}>{children}</div>;
+}
+
+function LanePicker({ lanes, selected, onChange }) {
+  const values = selected || [];
+  function toggle(lane) {
+    onChange(values.includes(lane) ? values.filter(x => x !== lane) : [...values, lane]);
+  }
+  if (!lanes.length) {
+    return (
+      <div style={opStyles.guideBox}>
+        No hay carriles AVC sincronizados todavía. Sincroniza una fuente AVC o revisa el mapeo en System Configuration para poblar esta lista.
+      </div>
+    );
+  }
+  return (
+    <div style={opStyles.laneBox}>
+      <div style={{display:"flex", gap:6, marginBottom:8, flexWrap:"wrap"}}>
+        <OpButton onClick={() => onChange(lanes)}>All lanes</OpButton>
+        <OpButton onClick={() => onChange([])}>Clear</OpButton>
+      </div>
+      <div style={{display:"flex", gap:6, flexWrap:"wrap"}}>
+        {lanes.map(lane => (
+          <button key={lane} onClick={() => toggle(lane)} style={{
+            ...opStyles.chip,
+            background: values.includes(lane) ? "rgba(77,127,224,0.15)" : "#1e2535",
+            color: values.includes(lane) ? "#4d7fe0" : "#8a9ab5",
+            borderColor: values.includes(lane) ? "rgba(77,127,224,0.45)" : "#2a3045",
+          }}>{lane}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OpButton({ children, onClick, tone = "neutral", disabled }) {
+  const tr = window.t || (v => v);
+  const colors = {
+    primary: {bg:"#4d7fe0", color:"#080d1a", border:"#4d7fe0"},
+    danger: {bg:"rgba(255,76,106,0.08)", color:"#ff4c6a", border:"rgba(255,76,106,0.35)"},
+    success: {bg:"rgba(34,201,123,0.08)", color:"#22c97b", border:"rgba(34,201,123,0.35)"},
+    neutral: {bg:"#1e2535", color:"#8a9ab5", border:"#2a3045"},
+  }[tone];
+  return <button disabled={disabled} onClick={onClick} style={{...opStyles.btn, background:colors.bg, color:colors.color, borderColor:colors.border, opacity:disabled?0.55:1}}>{typeof children === "string" ? tr(children) : children}</button>;
+}
+
+function OpTable({ columns, rows, empty, actions }) {
+  const tr = window.t || (v => v);
+  return (
+    <div style={opStyles.tablePanel}>
+      <div style={{overflowX:"auto"}}>
+        <table style={opStyles.table}>
+          <thead><tr>{columns.map(c => <th key={c.key} style={opStyles.th}>{tr(c.label)}</th>)}{actions && <th style={opStyles.th}>{tr("Actions")}</th>}</tr></thead>
+          <tbody>
+            {rows.map((r, idx) => (
+              <tr key={r.id || idx} style={{background:idx % 2 ? "#0f1219" : "#0d1525"}}>
+                {columns.map(c => <td key={c.key} style={opStyles.td}>{c.render ? c.render(r) : (r[c.key] || "—")}</td>)}
+                {actions && <td style={opStyles.td}><div style={opStyles.actions}>{actions(r)}</div></td>}
+              </tr>
+            ))}
+            {!rows.length && <tr><td colSpan={columns.length + (actions ? 1 : 0)} style={{...opStyles.td, textAlign:"center", padding:28, color:"#5b6a8a"}}>{tr(empty)}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function emailList(value) {
+  if (Array.isArray(value)) return value.join(", ");
+  return value || "—";
+}
+
+function opNum(value) {
+  return new Intl.NumberFormat().format(Number(value || 0));
+}
+
+function reportDateRange(period) {
+  const today = new Date();
+  const end = new Date(today);
+  const start = new Date(end);
+  if (period === "Previous hour") {
+    return {date_from:today.toISOString().slice(0, 10), date_to:today.toISOString().slice(0, 10)};
+  }
+  end.setDate(today.getDate() - 1);
+  start.setTime(end.getTime());
+  if (period === "Previous week") start.setDate(end.getDate() - 6);
+  return {date_from:start.toISOString().slice(0, 10), date_to:end.toISOString().slice(0, 10)};
+}
+
+function reportRowsForType(rows, reportType) {
+  if (reportType === "Axle Count Discrepancy Report") return rows.filter(r => Number(r.axleErr || 0) > 0);
+  if (reportType === "Vehicle Classification Mismatch Report") return rows.filter(r => Number(r.classMismatch || 0) > 0);
+  if (reportType === "Possible Evasion Report") return rows.filter(r => Number(r.satOnly || 0) > 0 || Number(r.avcOnly || 0) > 0);
+  return rows;
+}
+
+function reportPreviewRows(form, preview) {
+  const selected = form.lanes || [];
+  return reportRowsForType((preview?.rows || []).filter(r => !selected.length || selected.includes(r.lane)), form.type);
+}
+
+function reportPreviewTotals(rows) {
+  const totals = rows.reduce((acc, r) => {
+    acc.total += Number(r.total || 0);
+    acc.matched += Number(r.matched || 0);
+    acc.avcOnly += Number(r.avcOnly || 0);
+    acc.satOnly += Number(r.satOnly || 0);
+    acc.axleErr += Number(r.axleErr || 0);
+    acc.classMismatch += Number(r.classMismatch || 0);
+    return acc;
+  }, {total:0, matched:0, avcOnly:0, satOnly:0, axleErr:0, classMismatch:0});
+  totals.discrepancy = totals.avcOnly + totals.satOnly + totals.axleErr;
+  totals.matchRate = Math.round((totals.total - totals.satOnly) / Math.max(totals.total, 1) * 1000) / 10;
+  totals.discrepancyRate = Math.round(totals.discrepancy / Math.max(totals.total, 1) * 1000) / 10;
+  return totals;
+}
+
+function escapeHtml(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function openPrintableReport(form, preview, targetWin) {
+  const rows = reportPreviewRows(form, preview);
+  const totals = reportPreviewTotals(rows);
+  const maxValue = Math.max(...rows.map(r => Number(r.total || 0)), 1);
+  const chartRows = rows.slice(0, 12).map(r => {
+    const matched = Number(r.matched || 0);
+    const avcOnly = Number(r.avcOnly || 0);
+    const satOnly = Number(r.satOnly || 0);
+    const axleErr = Number(r.axleErr || 0);
+    const total = Math.max(Number(r.total || 0), 1);
+    const rowWidth = Math.max(8, Math.round(Number(r.total || 0) / maxValue * 100));
+    const segment = (value) => Math.max(value ? 4 : 0, Math.round(value / total * 100));
+    return `<div class="bar-row">
+      <div class="bar-label"><strong>${escapeHtml(r.lane)}</strong><span>${escapeHtml(r.date)}</span></div>
+      <div class="bar-shell" style="width:${rowWidth}%">
+        <div class="seg matched" style="width:${segment(matched)}%"></div>
+        <div class="seg avc" style="width:${segment(avcOnly)}%"></div>
+        <div class="seg sat" style="width:${segment(satOnly)}%"></div>
+        <div class="seg axle" style="width:${segment(axleErr)}%"></div>
+      </div>
+      <strong>${opNum(r.total)}</strong>
+    </div>`;
+  }).join("");
+  const tableRows = rows.slice(0, 40).map(r => `
+    <tr>
+      <td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.lane)}</td><td>${opNum(r.total)}</td><td>${opNum(r.matched)}</td>
+      <td>${opNum(r.avcOnly)}</td><td>${opNum(r.satOnly)}</td><td>${opNum(r.axleErr)}</td><td>${r.discrepancyRate || 0}%</td>
+    </tr>
+  `).join("");
+  const generatedAt = new Date().toLocaleString();
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"/><title>${escapeHtml(form.name || form.type)}</title>
+<style>
+*{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important} body{font-family:Arial,Helvetica,sans-serif;color:#111827;margin:0;background:#f3f6fb}
+.page{max-width:1080px;margin:0 auto;background:#fff;min-height:100vh;padding:30px 34px 36px}
+.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.print-btn{background:#4d7fe0;color:#fff;border:0;border-radius:7px;padding:9px 14px;font-weight:700;cursor:pointer}
+.header{display:grid;grid-template-columns:170px 1fr auto;gap:22px;align-items:center;border-bottom:3px solid #111827;padding-bottom:20px}
+.logo-box{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff;display:flex;align-items:center;justify-content:center;min-height:86px}
+.logo{max-width:138px;max-height:64px;object-fit:contain}.brand{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:#64748b;font-weight:700}
+h1{margin:5px 0 6px;font-size:25px;line-height:1.15}.meta{color:#64748b;font-size:12px;line-height:1.55}.badge{display:inline-block;background:#eaf1ff;color:#2f5fb7;border:1px solid #c7d8ff;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700}
+.summary{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin:18px 0}.summary-card{border:1px solid #dbe3ef;border-radius:10px;padding:13px 15px;background:#fbfdff}.summary-card h2{font-size:13px;margin:0 0 8px}.summary-card p{margin:4px 0;color:#475569;font-size:12px}
+.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0}.kpi{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff;box-shadow:0 1px 0 rgba(15,23,42,.04)}.kpi span{display:block;color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px}.kpi strong{display:block;font-size:22px;margin-top:5px}.kpi.good strong{color:#14965a}.kpi.warn strong{color:#b88900}.kpi.bad strong{color:#d92d53}.kpi.info strong{color:#2f5fb7}
+.section{margin-top:24px;border:1px solid #dbe3ef;border-radius:10px;padding:16px;background:#fff}.section h2{font-size:15px;margin:0 0 12px}.legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:11px;color:#475569}.dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}.matched-dot{background:#22c97b}.avc-dot{background:#ff7e3f}.sat-dot{background:#5b9cf6}.axle-dot{background:#f5d433}
+.bar-row{display:grid;grid-template-columns:145px 1fr 58px;gap:10px;align-items:center;margin:10px 0;font-size:11px}.bar-label strong{display:block;color:#111827}.bar-label span{display:block;color:#64748b;margin-top:2px}.bar-shell{height:18px;background:#eef2f7;border-radius:999px;overflow:hidden;display:flex;min-width:32px}.seg{height:18px}.matched{background:#22c97b}.avc{background:#ff7e3f}.sat{background:#5b9cf6}.axle{background:#f5d433}
+table{width:100%;border-collapse:separate;border-spacing:0;margin-top:10px;font-size:11px;overflow:hidden;border:1px solid #dbe3ef;border-radius:8px}th,td{padding:8px 9px;text-align:left;border-bottom:1px solid #e5eaf2}th{background:#f1f5f9;color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:.45px}tr:last-child td{border-bottom:0}.footer{display:flex;justify-content:space-between;margin-top:24px;color:#64748b;font-size:10px;border-top:1px solid #dbe3ef;padding-top:12px}
+@page{margin:12mm}@media print{body{background:#fff}.page{padding:18px;max-width:none}.toolbar{display:none}.section{break-inside:avoid}.kpis{break-inside:avoid}}
+</style></head>
+<body>
+<div class="page">
+<div class="toolbar"><button class="print-btn" onclick="window.print()">Print / Save as PDF</button></div>
+<div class="header">
+  <div class="logo-box"><img class="logo" src="/logo.jpeg" alt="AG Holdings"/></div>
+  <div>
+    <div class="brand">AG-metrics Toll Audit Platform</div>
+    <h1>${escapeHtml(form.name || form.type)}</h1>
+    <div class="meta">${escapeHtml(form.plaza || "")} · ${escapeHtml(form.type)}<br/>${escapeHtml(preview?.date_from || "")} to ${escapeHtml(preview?.date_to || "")} · Generated ${escapeHtml(generatedAt)}</div>
+  </div>
+  <div><span class="badge">${escapeHtml(form.template || "Standard PDF")}</span></div>
+</div>
+<div class="kpis">
+  <div class="kpi info"><span>Total events</span><strong>${opNum(totals.total)}</strong></div>
+  <div class="kpi good"><span>Matched</span><strong>${opNum(totals.matched)}</strong></div>
+  <div class="kpi bad"><span>Discrepancies</span><strong>${opNum(totals.discrepancy)}</strong></div>
+  <div class="kpi info"><span>Detection rate</span><strong>${totals.matchRate}%</strong></div>
+  <div class="kpi warn"><span>Axle errors</span><strong>${opNum(totals.axleErr)}</strong></div>
+  <div class="kpi bad"><span>Class mismatch</span><strong>${opNum(totals.classMismatch)}</strong></div>
+</div>
+<div class="summary">
+  <div class="summary-card"><h2>Report scope</h2><p><strong>Lanes:</strong> ${escapeHtml((form.lanes || []).join(", ") || "All available lanes")}</p><p><strong>Frequency:</strong> ${escapeHtml(form.frequency || "Manual only")}</p><p><strong>Recipients:</strong> ${escapeHtml(form.recipients || form.contact_group || "Not configured")}</p></div>
+  <div class="summary-card"><h2>Included sections</h2><p>KPI indicators</p><p>Lane/day discrepancy chart</p><p>Detail table with reconciliation totals</p></div>
+</div>
+<div class="section"><h2>Results by lane and day</h2><div class="legend"><span><i class="dot matched-dot"></i>Matched</span><span><i class="dot avc-dot"></i>AVC only</span><span><i class="dot sat-dot"></i>SAT only</span><span><i class="dot axle-dot"></i>Axle errors</span></div>${chartRows || '<p class="meta">No data available</p>'}</div>
+<div class="section"><h2>Detail table</h2><table><thead><tr><th>Date</th><th>Lane</th><th>Total</th><th>Matched</th><th>AVC only</th><th>SAT only</th><th>Axle errors</th><th>Discrepancy rate</th></tr></thead><tbody>${tableRows}</tbody></table></div>
+<div class="footer"><span>AG-metrics · AVC/SAT Audit Report</span><span>${escapeHtml(form.template || "Standard PDF")}</span></div>
+</div>
+</body></html>`;
+  const win = targetWin || window.open("", "_blank");
+  if (!win) return;
+  win.document.write(html);
+  win.document.close();
+}
+
+function ReportBuilderPreview({ form, preview, loading, onRefresh }) {
+  const tr = window.t || (v => v);
+  const chartRef = React.useRef(null);
+  const chartInstance = React.useRef(null);
+  const selected = form.lanes || [];
+  const rows = reportPreviewRows(form, preview);
+  const totals = reportPreviewTotals(rows);
+
+  React.useEffect(() => {
+    if (!chartRef.current || !window.Chart) return;
+    if (chartInstance.current) chartInstance.current.destroy();
+    const labels = rows.map(r => `${r.date} ${r.lane}`).slice(0, 12);
+    const data = rows.slice(0, 12);
+    chartInstance.current = new Chart(chartRef.current, {
+      type:"bar",
+      data:{
+        labels,
+        datasets:[
+          {label:tr("Matched"), data:data.map(r=>r.matched || 0), backgroundColor:"rgba(34,201,123,0.75)"},
+          {label:tr("AVC only"), data:data.map(r=>r.avcOnly || 0), backgroundColor:"rgba(255,126,63,0.75)"},
+          {label:tr("SAT only"), data:data.map(r=>r.satOnly || 0), backgroundColor:"rgba(91,156,246,0.75)"},
+          {label:tr("Axle errors"), data:data.map(r=>r.axleErr || 0), backgroundColor:"rgba(245,212,51,0.75)"},
+        ],
+      },
+      options:{
+        responsive:true,
+        maintainAspectRatio:false,
+        plugins:{legend:{labels:{color:"#8a9ab5", font:{size:11, family:"Inter"}}}},
+        scales:{
+          x:{ticks:{color:"#8a9ab5", font:{size:10}}, grid:{color:"#1e2535"}},
+          y:{ticks:{color:"#8a9ab5", font:{size:10}}, grid:{color:"#1e2535"}},
+        },
+      },
+    });
+    return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+  }, [JSON.stringify(rows.map(r => [r.date, r.lane, r.total, r.matched, r.avcOnly, r.satOnly, r.axleErr])), form.type]);
+
+  return (
+    <div style={opStyles.previewPanel}>
+      <div style={opStyles.previewHeader}>
+        <div>
+          <div style={{fontSize:16,fontWeight:800,color:"#e8edf5"}}>{tr("Report Preview")}</div>
+          <div style={{fontSize:12,color:"#5b6a8a",marginTop:3}}>
+            {form.type} · {form.period} · {selected.length ? `${selected.length} ${tr("lanes selected")}` : tr("All available lanes")}
+          </div>
+        </div>
+        <OpButton onClick={onRefresh} disabled={loading}>{loading ? "Loading..." : "Refresh Preview"}</OpButton>
+      </div>
+      <div style={opStyles.kpiGrid}>
+        {[
+          ["Total events", opNum(totals.total), "#e8edf5"],
+          ["Matched", opNum(totals.matched), "#22c97b"],
+          ["Discrepancies", opNum(totals.discrepancy), "#ff4c6a"],
+          ["Detection rate", `${totals.matchRate}%`, "#5b9cf6"],
+          ["Axle errors", opNum(totals.axleErr), "#f5d433"],
+          ["Class mismatch", opNum(totals.classMismatch), "#ff7e3f"],
+        ].map(([label, value, color]) => (
+          <div key={label} style={opStyles.kpiCard}>
+            <div style={{fontSize:11,color:"#5b6a8a",marginBottom:4}}>{tr(label)}</div>
+            <div style={{fontSize:20,fontWeight:800,color}}>{value}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1.1fr 0.9fr",gap:14,alignItems:"stretch"}}>
+        <div style={opStyles.chartPanel}>
+          <div style={opStyles.panelTitle}>{tr("Results by lane and day")}</div>
+          <div style={{height:260}}>{rows.length ? <canvas ref={chartRef}/> : <div style={opStyles.emptyBox}>{loading ? tr("Loading...") : tr("No reconciliation data for this selection")}</div>}</div>
+        </div>
+        <div style={opStyles.chartPanel}>
+          <div style={opStyles.panelTitle}>{tr("Report content")}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8,fontSize:12,color:"#c8d4e8"}}>
+            <div style={opStyles.contentLine}><span>{tr("Template")}</span><strong>{form.template}</strong></div>
+            <div style={opStyles.contentLine}><span>{tr("Plaza")}</span><strong>{form.plaza || "—"}</strong></div>
+            <div style={opStyles.contentLine}><span>{tr("Period")}</span><strong>{preview ? `${preview.date_from} → ${preview.date_to}` : "—"}</strong></div>
+            <div style={opStyles.contentLine}><span>{tr("Tables")}</span><strong>{tr("Summary, discrepancies, lane detail")}</strong></div>
+            <div style={opStyles.contentLine}><span>{tr("Charts")}</span><strong>{tr("KPI cards and lane/day bars")}</strong></div>
+          </div>
+        </div>
+      </div>
+      <OpTable columns={[
+        {key:"date",label:"Date/time",render:r=>r.date},
+        {key:"lane",label:"Lane"},
+        {key:"total",label:"Total events",render:r=>opNum(r.total)},
+        {key:"matched",label:"Matched",render:r=>opNum(r.matched)},
+        {key:"avcOnly",label:"AVC only",render:r=>opNum(r.avcOnly)},
+        {key:"satOnly",label:"SAT only",render:r=>opNum(r.satOnly)},
+        {key:"axleErr",label:"Axle errors",render:r=>opNum(r.axleErr)},
+        {key:"discrepancyRate",label:"Discrepancy rate",render:r=>`${r.discrepancyRate || 0}%`},
+      ]} rows={rows.slice(0, 20)} empty="No rows to include in the report"/>
+    </div>
+  );
+}
+
+function ReportsModule({ section }) {
+  const [reports, setReports] = React.useState([]);
+  const [history, setHistory] = React.useState([]);
+  const [templates, setTemplates] = React.useState([]);
+  const [groups, setGroups] = React.useState([]);
+  const [systemInfo, setSystemInfo] = React.useState({plaza:"", lanes:[], lane_mapping:{}});
+  const [previewData, setPreviewData] = React.useState(null);
+  const [previewLoading, setPreviewLoading] = React.useState(false);
+  const [msg, setMsg] = React.useState("");
+  const [form, setForm] = React.useState({
+    name:"", type:REPORT_TYPES[0].label, plaza:"", lanes:[], period:"Previous day", frequency:"Manual only",
+    send_time:"07:00", recipients:"", contact_group:"", template:"Standard PDF", status:"Draft",
+  });
+  const [settings, setSettings] = React.useState({timezone:"America/Mexico_City", default_template:"Standard PDF", language:"English", attach_pdf:true, footer_text:"Generated by AG-metrics"});
+  const [templateForm, setTemplateForm] = React.useState({name:"", logo:"", header_text:"", footer_text:"", language:"English", is_default:false, status:"Active"});
+
+  function reload() {
+    return opFetchAll([
+      ["/api/report-configs", setReports],
+      ["/api/report-history", setHistory],
+      ["/api/report-templates", setTemplates],
+      ["/api/contact-groups", setGroups],
+    ]);
+  }
+  React.useEffect(() => {
+    reload();
+    window.API.get("/api/report-settings").then(setSettings).catch(()=>{});
+    Promise.all([
+      window.API.get("/api/config").catch(()=>({})),
+      window.API.get("/api/avc/lanes").catch(()=>({lanes:[]})),
+    ]).then(([cfg, laneData]) => {
+      let mapping = {};
+      try { mapping = typeof cfg.lane_mapping === "string" ? JSON.parse(cfg.lane_mapping || "{}") : (cfg.lane_mapping || {}); } catch(e) {}
+      const plaza = cfg.plaza_name || "Configured plaza";
+      const lanes = laneData.lanes || [];
+      setSystemInfo({plaza, lanes, lane_mapping:mapping});
+      setForm(p => ({
+        ...p,
+        plaza: p.plaza || plaza,
+        lanes: p.lanes && p.lanes.length ? p.lanes : lanes,
+        template: p.template || "Standard PDF",
+      }));
+    });
+  }, []);
+
+  function saveReport(status) {
+    const payload = {...form, status, lanes: form.lanes || [], recipients: form.recipients.split(",").map(e=>e.trim()).filter(Boolean)};
+    window.API.post("/api/report-configs", payload).then(() => { setMsg("Report saved"); reload(); }).catch(e => setMsg(e.message));
+  }
+  function sendNow(r) {
+    setMsg("Sending report...");
+    const range = reportDateRange((r && r.period) || form.period);
+    const recipients = Array.isArray(r?.recipients)
+      ? r.recipients
+      : String((r && r.recipients) || form.recipients || "").split(",").map(e=>e.trim()).filter(Boolean);
+    window.API.post("/api/report-email/send-preview", {
+      date_from: range.date_from,
+      date_to: range.date_to,
+      report: {
+        ...(r || form),
+        recipients,
+        lanes: (r && r.lanes) || form.lanes || [],
+        type: (r && r.type) || form.type,
+        template: (r && r.template) || form.template,
+        language: settings.language || "Spanish",
+      },
+    })
+      .then(res => { setMsg(`Report sent to ${res.sent} recipient(s)`); reload(); })
+      .catch(e => setMsg(e.message || "Send failed"));
+  }
+  function preview() {
+    const range = reportDateRange(form.period);
+    setPreviewLoading(true);
+    window.API.get(`/api/reports/summary?date_from=${range.date_from}&date_to=${range.date_to}`)
+      .then(data => { setPreviewData(data); setMsg("Preview refreshed with current report selection"); })
+      .catch(e => setMsg(e.message || "Preview failed"))
+      .finally(() => setPreviewLoading(false));
+  }
+  function generatePreviewPdf() {
+    if (previewData) {
+      openPrintableReport(form, previewData);
+      return;
+    }
+    const pendingWin = window.open("", "_blank");
+    if (pendingWin) {
+      pendingWin.document.write("<p style='font-family:Arial;padding:24px'>Generating report...</p>");
+      pendingWin.document.close();
+    }
+    const range = reportDateRange(form.period);
+    setPreviewLoading(true);
+    window.API.get(`/api/reports/summary?date_from=${range.date_from}&date_to=${range.date_to}`)
+      .then(data => {
+        setPreviewData(data);
+        openPrintableReport(form, data, pendingWin);
+        setMsg("Printable report generated with charts and tables");
+      })
+      .catch(e => {
+        if (pendingWin) pendingWin.close();
+        setMsg(e.message || "Preview failed");
+      })
+      .finally(() => setPreviewLoading(false));
+  }
+  function saveReportSettings() {
+    window.API.post("/api/report-settings", settings).then(()=>setMsg("Report settings saved")).catch(e=>setMsg(e.message));
+  }
+  function saveTemplate(makeDefault) {
+    window.API.post("/api/report-templates", {...templateForm, is_default:makeDefault || templateForm.is_default})
+      .then(() => { setMsg("Template saved"); setTemplateForm({name:"", logo:"", header_text:"", footer_text:"", language:"English", is_default:false, status:"Active"}); reload(); })
+      .catch(e => setMsg(e.message));
+  }
+  function applyGroup(name) {
+    const group = groups.find(g => g.name === name);
+    setForm(p => ({...p, contact_group:name, recipients: group ? emailList(group.emails) : p.recipients}));
+  }
+  const templateOptions = templates.length ? templates.map(t=>t.name) : ["Standard PDF"];
+  const selectedTypeHelp = optionHelp(REPORT_TYPES.map(t=>({id:t.label, help:t.help})), form.type);
+  const selectedPeriodHelp = optionHelp(REPORT_PERIODS, form.period);
+  const selectedFrequencyHelp = optionHelp(FREQUENCIES, form.frequency);
+
+  React.useEffect(() => {
+    if (section === "create" && !previewData && form.plaza) preview();
+  }, [section, form.plaza]);
+
+  const listColumns = [
+    {key:"name", label:"Report name"},
+    {key:"type", label:"Report type"},
+    {key:"frequency", label:"Frequency"},
+    {key:"recipients", label:"Recipients", render:r=>emailList(r.recipients)},
+    {key:"status", label:"Status"},
+    {key:"last_sent", label:"Last sent"},
+  ];
+  if (section === "create") return (
+    <OpPage title="Create Report" msg={msg}>
+      <ReportBuilderPreview form={form} preview={previewData} loading={previewLoading} onRefresh={preview}/>
+      <div style={{fontSize:16,fontWeight:800,color:"#e8edf5",margin:"22px 0 12px"}}>{(window.t || (v=>v))("Report Setup")}</div>
+      <div style={opStyles.formGrid}>
+        <OpField label="Report name" value={form.name} onChange={v=>setForm({...form,name:v})}/>
+        <div>
+          <OpField label="Report type" value={form.type} onChange={v=>setForm({...form,type:v})} options={REPORT_TYPES.map(t=>t.label)}/>
+          <OpHint>{selectedTypeHelp}</OpHint>
+        </div>
+        <div>
+          <OpField label="Plaza" value={form.plaza} onChange={v=>setForm({...form,plaza:v})} options={[systemInfo.plaza || "Configured plaza"]}/>
+          <OpHint>Tomado de la configuración del sistema. Si necesitas otra plaza, actualízala primero en System Configuration.</OpHint>
+        </div>
+        <div>
+          <label style={opStyles.label}>Lanes</label>
+          <LanePicker lanes={systemInfo.lanes} selected={form.lanes} onChange={lanes=>setForm({...form,lanes})}/>
+          <OpHint>Selecciona los carriles que este reporte debe cubrir. La lista viene de los carriles AVC sincronizados.</OpHint>
+        </div>
+        <div>
+          <OpField label="Report period" value={form.period} onChange={v=>setForm({...form,period:v})} options={optionIds(REPORT_PERIODS)}/>
+          <OpHint>{selectedPeriodHelp}</OpHint>
+        </div>
+        <div>
+          <OpField label="Frequency" value={form.frequency} onChange={v=>setForm({...form,frequency:v})} options={optionIds(FREQUENCIES)}/>
+          <OpHint>{selectedFrequencyHelp}</OpHint>
+        </div>
+        <OpField label="Send time" type="time" value={form.send_time} onChange={v=>setForm({...form,send_time:v})}/>
+        <OpField label="Recipients" value={form.recipients} onChange={v=>setForm({...form,recipients:v})} placeholder="ops@example.com, audit@example.com"/>
+        <div>
+          <OpField label="Contact Group" value={form.contact_group} onChange={applyGroup} options={["", ...groups.map(g=>g.name)]}/>
+          <OpHint>El grupo llena los destinatarios reutilizables de Notifications > Contact Groups.</OpHint>
+        </div>
+        <div>
+          <OpField label="PDF template" value={form.template} onChange={v=>setForm({...form,template:v})} options={templateOptions}/>
+          <OpHint>Standard PDF queda disponible por default para todos los reportes.</OpHint>
+        </div>
+        <OpField label="Status" value={form.status} onChange={v=>setForm({...form,status:v})} options={["Draft","Active","Disabled"]}/>
+      </div>
+      <div style={opStyles.actions}>
+        <OpButton onClick={()=>saveReport("Draft")}>Save as Draft</OpButton>
+        <OpButton tone="primary" onClick={()=>saveReport("Active")}>Activate Report</OpButton>
+        <OpButton onClick={generatePreviewPdf}>Generate Preview PDF</OpButton>
+        <OpButton tone="success" onClick={()=>sendNow(form)}>Send Test Report</OpButton>
+      </div>
+    </OpPage>
+  );
+  if (section === "settings") return (
+    <OpPage title="Report Settings" msg={msg}>
+      <div style={opStyles.formGrid}>
+        <OpField label="Default timezone" value={settings.timezone} onChange={v=>setSettings({...settings,timezone:v})}/>
+        <OpField label="Default PDF template" value={settings.default_template} onChange={v=>setSettings({...settings,default_template:v})} options={templateOptions}/>
+        <OpField label="Default report language" value={settings.language} onChange={v=>setSettings({...settings,language:v})} options={["English","Spanish"]}/>
+        <OpField label="Attach PDF to email" value={settings.attach_pdf ? "Yes" : "No"} onChange={v=>setSettings({...settings,attach_pdf:v==="Yes"})} options={["Yes","No"]}/>
+        <OpField label="Default footer text" value={settings.footer_text} onChange={v=>setSettings({...settings,footer_text:v})}/>
+      </div>
+      <OpButton tone="primary" onClick={saveReportSettings}>Save Settings</OpButton>
+    </OpPage>
+  );
+  if (section === "templates") return (
+    <OpPage title="Report Templates" msg={msg}>
+      <div style={opStyles.formGrid}>
+        <OpField label="Template name" value={templateForm.name} onChange={v=>setTemplateForm({...templateForm,name:v})}/>
+        <OpField label="Logo" value={templateForm.logo} onChange={v=>setTemplateForm({...templateForm,logo:v})} placeholder="Logo path or URL"/>
+        <OpField label="Header text" value={templateForm.header_text} onChange={v=>setTemplateForm({...templateForm,header_text:v})}/>
+        <OpField label="Footer text" value={templateForm.footer_text} onChange={v=>setTemplateForm({...templateForm,footer_text:v})}/>
+        <OpField label="Language" value={templateForm.language} onChange={v=>setTemplateForm({...templateForm,language:v})} options={["English","Spanish"]}/>
+      </div>
+      <div style={opStyles.actions}><OpButton onClick={()=>setMsg("Template preview ready")}>Preview</OpButton><OpButton onClick={()=>saveTemplate(false)}>Edit</OpButton><OpButton tone="primary" onClick={()=>saveTemplate(true)}>Set as default</OpButton></div>
+      <OpTable columns={[{key:"name",label:"Template name"},{key:"header_text",label:"Header text"},{key:"footer_text",label:"Footer text"},{key:"language",label:"Language"},{key:"is_default",label:"Default",render:r=>r.is_default?"Yes":"No"}]} rows={templates} empty="No templates configured" actions={r => <OpButton onClick={()=>setTemplateForm(r)}>Edit</OpButton>}/>
+    </OpPage>
+  );
+  if (section === "history") return (
+    <OpPage title="Report History" msg={msg}>
+      <OpTable columns={[
+        {key:"date_time",label:"Date/time"},{key:"report_name",label:"Report name"},{key:"period",label:"Period covered"},
+        {key:"recipients",label:"Recipients",render:r=>emailList(r.recipients)},{key:"status",label:"Status"},{key:"pdf_file",label:"PDF file"},{key:"error",label:"Error message if failed"},
+      ]} rows={history} empty="No report history yet" actions={r => <><OpButton>Download PDF</OpButton><OpButton onClick={()=>sendNow(r)}>Resend</OpButton><OpButton>View notification log</OpButton></>}/>
+    </OpPage>
+  );
+  return (
+    <OpPage title="Report List" msg={msg}>
+      <OpTable columns={listColumns} rows={reports} empty="No reports configured yet" actions={r => <><OpButton>View</OpButton><OpButton onClick={()=>setForm({...r, recipients:emailList(r.recipients)})}>Edit</OpButton><OpButton onClick={()=>sendNow(r)}>Send now</OpButton><OpButton onClick={preview}>Preview PDF</OpButton><OpButton onClick={()=>window.API.post('/api/report-configs',{...r,status:r.status==='Active'?'Disabled':'Active'}).then(reload)}>{r.status==="Active"?"Disable":"Enable"}</OpButton><OpButton>View history</OpButton></>}/>
+    </OpPage>
+  );
+}
+
+function AlarmsModule({ section }) {
+  const [rules, setRules] = React.useState([]);
+  const [active, setActive] = React.useState([]);
+  const [history, setHistory] = React.useState([]);
+  const [groups, setGroups] = React.useState([]);
+  const [msg, setMsg] = React.useState("");
+  const [settings, setSettings] = React.useState({default_severity:"Warning", default_cooldown:10, emails_enabled:true, critical_group:"", history_days:90});
+  const [form, setForm] = React.useState({name:"", description:"", event_type:ALARM_EVENTS[0], plaza:"", lanes:"", condition:TRIGGER_EXAMPLES[0], severity:"Warning", recipients:"", contact_group:"", send_mode:"Immediately", cooldown:10, status:"Draft"});
+  function reload() {
+    opFetchAll([
+      ["/api/alarm-rules", setRules], ["/api/active-alarms", setActive],
+      ["/api/alarm-history", setHistory], ["/api/contact-groups", setGroups],
+    ]);
+    window.API.get("/api/alarm-settings").then(setSettings).catch(()=>{});
+  }
+  React.useEffect(reload, []);
+  function saveRule(status) {
+    window.API.post("/api/alarm-rules", {...form, status, recipients:form.recipients.split(",").map(e=>e.trim()).filter(Boolean)})
+      .then(()=>{ setMsg("Alarm rule saved"); reload(); }).catch(e=>setMsg(e.message));
+  }
+  function testRule(rule) {
+    window.API.post("/api/alarm-email/test", {alarm_name:rule.name, event_type:rule.event_type, severity:rule.severity, plaza:rule.plaza, recipients:rule.recipients || []})
+      .then(r=>setMsg(`Test alarm email sent to ${emailList(r.sent_to)}`)).catch(e=>setMsg(e.message));
+  }
+  function updateAlarm(alarm, status) {
+    window.API.post("/api/active-alarms", {...alarm, status, resolved_at:status==="Resolved"?new Date().toISOString():""})
+      .then(()=>{ setMsg(`Alarm marked ${status}`); reload(); }).catch(e=>setMsg(e.message));
+  }
+  if (section === "create") return (
+    <OpPage title="Create Alarm Rule" msg={msg}>
+      <div style={opStyles.formGrid}>
+        <OpField label="Alarm rule name" value={form.name} onChange={v=>setForm({...form,name:v})}/>
+        <OpField label="Description" value={form.description} onChange={v=>setForm({...form,description:v})}/>
+        <OpField label="Event type" value={form.event_type} onChange={v=>setForm({...form,event_type:v})} options={ALARM_EVENTS}/>
+        <OpField label="Plaza" value={form.plaza} onChange={v=>setForm({...form,plaza:v})}/>
+        <OpField label="Lanes" value={form.lanes} onChange={v=>setForm({...form,lanes:v})}/>
+        <OpField label="Trigger condition" value={form.condition} onChange={v=>setForm({...form,condition:v})} options={TRIGGER_EXAMPLES}/>
+        <OpField label="Severity" value={form.severity} onChange={v=>setForm({...form,severity:v})} options={["Info","Warning","Critical"]}/>
+        <OpField label="Recipients" value={form.recipients} onChange={v=>setForm({...form,recipients:v})} placeholder="ops@example.com"/>
+        <OpField label="Recipients / Contact Group" value={form.contact_group} onChange={v=>setForm({...form,contact_group:v})} options={["", ...groups.map(g=>g.name)]}/>
+        <OpField label="Send mode" value={form.send_mode} onChange={v=>setForm({...form,send_mode:v})} options={["Immediately","Every 15 minutes","Hourly digest","Do not email"]}/>
+        <OpField label="Cooldown" type="number" value={form.cooldown} onChange={v=>setForm({...form,cooldown:v})}/>
+        <OpField label="Status" value={form.status} onChange={v=>setForm({...form,status:v})} options={["Draft","Active","Disabled"]}/>
+      </div>
+      <div style={opStyles.actions}><OpButton onClick={()=>saveRule("Draft")}>Save as Draft</OpButton><OpButton tone="primary" onClick={()=>saveRule("Active")}>Activate Alarm</OpButton><OpButton onClick={()=>setMsg("Rule test completed")}>Test Rule</OpButton><OpButton tone="success" onClick={()=>testRule(form)}>Send Test Alarm Email</OpButton></div>
+    </OpPage>
+  );
+  if (section === "settings") return (
+    <OpPage title="Alarm Settings" msg={msg}>
+      <div style={opStyles.formGrid}>
+        <OpField label="Default severity" value={settings.default_severity} onChange={v=>setSettings({...settings,default_severity:v})} options={["Info","Warning","Critical"]}/>
+        <OpField label="Default cooldown in minutes" type="number" value={settings.default_cooldown} onChange={v=>setSettings({...settings,default_cooldown:v})}/>
+        <OpField label="Enable alarm emails by default" value={settings.emails_enabled ? "Yes" : "No"} onChange={v=>setSettings({...settings,emails_enabled:v==="Yes"})} options={["Yes","No"]}/>
+        <OpField label="Default contact group for critical alarms" value={settings.critical_group} onChange={v=>setSettings({...settings,critical_group:v})} options={["", ...groups.map(g=>g.name)]}/>
+        <OpField label="Keep alarm history for X days" type="number" value={settings.history_days} onChange={v=>setSettings({...settings,history_days:v})}/>
+      </div>
+      <OpButton tone="primary" onClick={()=>window.API.post("/api/alarm-settings", settings).then(()=>setMsg("Alarm settings saved")).catch(e=>setMsg(e.message))}>Save Settings</OpButton>
+    </OpPage>
+  );
+  if (section === "history") return <OpPage title="Alarm History" msg={msg}><OpTable columns={[{key:"date_time",label:"Date/time"},{key:"alarm_name",label:"Alarm name"},{key:"event_type",label:"Event type"},{key:"plaza",label:"Plaza"},{key:"lane",label:"Lane"},{key:"severity",label:"Severity"},{key:"status",label:"Status"},{key:"notification_status",label:"Notification status"},{key:"resolved_at",label:"Resolved at"}]} rows={history} empty="No alarm history yet" actions={()=><><OpButton>View details</OpButton><OpButton>View related transaction</OpButton><OpButton>View notification log</OpButton></>}/></OpPage>;
+  if (section === "rules") return <OpPage title="Alarm Rules" msg={msg}><OpTable columns={[{key:"name",label:"Rule name"},{key:"event_type",label:"Event type"},{key:"plaza",label:"Plaza"},{key:"lanes",label:"Lanes"},{key:"severity",label:"Severity"},{key:"send_mode",label:"Send mode"},{key:"cooldown",label:"Cooldown"},{key:"recipients",label:"Recipients",render:r=>emailList(r.recipients)},{key:"status",label:"Status"}]} rows={rules} empty="No alarm rules configured" actions={r=><><OpButton onClick={()=>setForm({...r, recipients:emailList(r.recipients)})}>Edit</OpButton><OpButton onClick={()=>testRule(r)}>Test</OpButton><OpButton onClick={()=>window.API.post('/api/alarm-rules',{...r,status:r.status==='Active'?'Disabled':'Active'}).then(reload)}>{r.status==="Active"?"Disable":"Enable"}</OpButton><OpButton>View alarm history</OpButton><OpButton>View notification history</OpButton></>}/></OpPage>;
+  return <OpPage title="Active Alarms" msg={msg}><OpTable columns={[{key:"name",label:"Alarm name"},{key:"severity",label:"Severity"},{key:"plaza",label:"Plaza"},{key:"lane",label:"Lane"},{key:"event_type",label:"Event type"},{key:"triggered_at",label:"Triggered at"},{key:"status",label:"Status"}]} rows={active} empty="No open alarms" actions={r=><><OpButton>View details</OpButton><OpButton onClick={()=>updateAlarm(r,"Acknowledged")}>Acknowledge</OpButton><OpButton onClick={()=>updateAlarm(r,"In Review")}>Mark as in review</OpButton><OpButton tone="success" onClick={()=>updateAlarm(r,"Resolved")}>Resolve</OpButton><OpButton tone="danger" onClick={()=>updateAlarm(r,"Ignored")}>Ignore</OpButton></>}/></OpPage>;
+}
+
+function NotificationsModule({ section }) {
+  const [history, setHistory] = React.useState([]);
+  const [groups, setGroups] = React.useState([]);
+  const [msg, setMsg] = React.useState("");
+  const [group, setGroup] = React.useState({name:"", description:"", emails:"", status:"Active"});
+  function reload() { opFetchAll([["/api/notification-history", setHistory], ["/api/contact-groups", setGroups]]); }
+  React.useEffect(reload, []);
+  function saveGroup() {
+    window.API.post("/api/contact-groups", {...group, emails:group.emails.split(",").map(e=>e.trim()).filter(Boolean)})
+      .then(()=>{ setMsg("Contact group saved"); setGroup({name:"", description:"", emails:"", status:"Active"}); reload(); }).catch(e=>setMsg(e.message));
+  }
+  if (section === "groups") return (
+    <OpPage title="Contact Groups" msg={msg}>
+      <div style={opStyles.formGrid}>
+        <OpField label="Group name" value={group.name} onChange={v=>setGroup({...group,name:v})}/>
+        <OpField label="Description" value={group.description} onChange={v=>setGroup({...group,description:v})}/>
+        <OpField label="Emails" value={group.emails} onChange={v=>setGroup({...group,emails:v})} placeholder="audit@example.com, ops@example.com"/>
+        <OpField label="Status" value={group.status} onChange={v=>setGroup({...group,status:v})} options={["Active","Inactive"]}/>
+      </div>
+      <div style={opStyles.actions}><OpButton tone="primary" onClick={saveGroup}>Create group</OpButton><OpButton onClick={saveGroup}>Edit group</OpButton><OpButton tone="danger" onClick={()=>setGroup({name:"", description:"", emails:"", status:"Active"})}>Delete group</OpButton><OpButton>Add recipient</OpButton><OpButton>Remove recipient</OpButton></div>
+      <OpTable columns={[{key:"name",label:"Group name"},{key:"description",label:"Description"},{key:"emails",label:"Emails",render:r=>emailList(r.emails)},{key:"status",label:"Status"}]} rows={groups} empty="No contact groups" actions={r=><><OpButton onClick={()=>setGroup({...r, emails:emailList(r.emails)})}>Edit group</OpButton><OpButton tone="danger">Delete group</OpButton></>}/>
+    </OpPage>
+  );
+  return <OpPage title="Notification History" msg={msg}><OpTable columns={[{key:"date_time",label:"Date/time"},{key:"type",label:"Notification type"},{key:"related",label:"Related report or alarm"},{key:"subject",label:"Subject"},{key:"recipients",label:"Recipients",render:r=>emailList(r.recipients)},{key:"status",label:"Status"},{key:"error",label:"Error message"}]} rows={history} empty="No notifications recorded yet" actions={()=><><OpButton>View details</OpButton><OpButton>Retry</OpButton><OpButton>View related report</OpButton><OpButton>View related alarm</OpButton></>}/></OpPage>;
+}
+
+function SettingsModule() {
+  return (
+    <OpPage title="Email / SMTP Configuration">
+      <EmailSmtpConfiguration/>
+    </OpPage>
+  );
+}
+
+function EmailSmtpConfiguration() {
+  const empty = {smtp:{host:"", port:587, security:"TLS", username:"", password:"", from_email:"", from_name:"AG-metrics", email_enabled:true}, recipients:[], schedule:{}};
+  const [settings, setSettings] = React.useState(empty);
+  const [testTo, setTestTo] = React.useState("");
+  const [msg, setMsg] = React.useState("");
+  const [busy, setBusy] = React.useState("");
+  React.useEffect(() => {
+    window.API.get("/api/report-email/settings")
+      .then(d => setSettings({...empty, ...d, smtp:{...empty.smtp, ...(d.smtp || {})}}))
+      .catch(e => setMsg(e.message || "Could not load SMTP settings"));
+  }, []);
+  const setSmtp = (key, value) => setSettings(p => ({...p, smtp:{...p.smtp, [key]:value}}));
+  function save() {
+    setBusy("save"); setMsg("");
+    window.API.post("/api/report-email/settings", settings)
+      .then(() => setMsg("Configuration saved"))
+      .catch(e => setMsg(e.message || "Save failed"))
+      .finally(() => setBusy(""));
+  }
+  function testConnection() {
+    const email = (testTo.trim() || settings.smtp.from_email || settings.smtp.username || "").trim();
+    if (!email) { setMsg("Enter a test recipient or configure From email"); return; }
+    setBusy("test"); setMsg("");
+    window.API.post("/api/report-email/test", {to: email})
+      .then(r => setMsg("SMTP test email sent to " + r.sent_to))
+      .catch(e => setMsg(e.message || "SMTP test failed"))
+      .finally(() => setBusy(""));
+  }
+  return (
+    <div>
+      {msg && <div style={{...opStyles.notice, color:msg.toLowerCase().includes("fail") || msg.toLowerCase().includes("error") ? "#ff4c6a" : "#22c97b"}}>{msg}</div>}
+      <div style={opStyles.formGrid}>
+        <OpField label="SMTP host" value={settings.smtp.host} onChange={v=>setSmtp("host",v)} placeholder="smtp.company.com"/>
+        <OpField label="SMTP port" type="number" value={settings.smtp.port} onChange={v=>setSmtp("port",v)} placeholder="587"/>
+        <OpField label="Security type" value={settings.smtp.security} onChange={v=>setSmtp("security",v)} options={["TLS","SSL","None"]}/>
+        <OpField label="SMTP username" value={settings.smtp.username} onChange={v=>setSmtp("username",v)}/>
+        <OpField label="SMTP password hidden" type="password" value={settings.smtp.password} onChange={v=>setSmtp("password",v)}/>
+        <OpField label="From email" value={settings.smtp.from_email} onChange={v=>setSmtp("from_email",v)} placeholder="reports@company.com"/>
+        <OpField label="From name" value={settings.smtp.from_name} onChange={v=>setSmtp("from_name",v)} placeholder="AG-metrics Reports"/>
+        <OpField label="Enable/disable email sending" value={settings.smtp.email_enabled === false ? "Disabled" : "Enabled"} onChange={v=>setSmtp("email_enabled",v==="Enabled")} options={["Enabled","Disabled"]}/>
+        <OpField label="Test email recipient" value={testTo} onChange={setTestTo} placeholder="user@company.com"/>
+      </div>
+      <div style={opStyles.actions}>
+        <OpButton onClick={testConnection} disabled={!!busy}>{busy==="test" ? "Testing..." : "Test SMTP Connection"}</OpButton>
+        <OpButton onClick={testConnection} disabled={!!busy}>{busy==="test" ? "Sending..." : "Send Test Email"}</OpButton>
+        <OpButton tone="primary" onClick={save} disabled={!!busy}>{busy==="save" ? "Saving..." : "Save Configuration"}</OpButton>
+      </div>
+    </div>
+  );
+}
+
+function OpPage({ title, msg, children }) {
+  const tr = window.t || (v => v);
+  return (
+    <div>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18}}>
+        <div style={{fontSize:16, fontWeight:700, color:"#e8edf5"}}>{tr(title)}</div>
+        {msg && <div style={{fontSize:12, color:msg.toLowerCase().includes("fail") || msg.toLowerCase().includes("error") ? "#ff4c6a" : "#22c97b"}}>{msg}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const opStyles = {
+  formGrid: {display:"grid", gridTemplateColumns:"repeat(2, minmax(220px, 1fr))", gap:"14px 16px", marginBottom:18},
+  field: {display:"flex", flexDirection:"column", gap:6},
+  label: {fontSize:11, color:"#8a9ab5", fontWeight:500},
+  input: {width:"100%", background:"#080d1a", border:"1px solid #2a3045", borderRadius:7, padding:"9px 12px", color:"#e8edf5", fontSize:13, fontFamily:"inherit", outline:"none"},
+  checkbox: {width:18, height:18},
+  btn: {border:"1px solid", borderRadius:7, padding:"7px 10px", fontSize:11, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap"},
+  actions: {display:"flex", gap:7, flexWrap:"wrap", alignItems:"center"},
+  tablePanel: {background:"#0d1525", border:"1px solid #2a3045", borderRadius:8, overflow:"hidden", marginTop:14},
+  table: {width:"100%", borderCollapse:"collapse", fontSize:12},
+  th: {padding:"10px 12px", textAlign:"left", fontSize:11, color:"#5b6a8a", borderBottom:"1px solid #1e2535", whiteSpace:"nowrap"},
+  td: {padding:"10px 12px", color:"#c8d4e8", borderBottom:"1px solid #1a1e2e", verticalAlign:"top"},
+  notice: {background:"#080d1a", border:"1px solid #2a3045", borderRadius:7, padding:"10px 12px", fontSize:12, marginBottom:14},
+  hint: {fontSize:11, color:"#5b6a8a", marginTop:6, lineHeight:1.35},
+  guideBox: {background:"#080d1a", border:"1px solid #2a3045", borderRadius:7, padding:"10px 12px", color:"#8a9ab5", fontSize:12, lineHeight:1.4, marginTop:6},
+  laneBox: {background:"#080d1a", border:"1px solid #2a3045", borderRadius:7, padding:"10px 12px", marginTop:6},
+  chip: {border:"1px solid", borderRadius:6, padding:"5px 10px", fontSize:11, cursor:"pointer", fontFamily:"inherit"},
+  previewPanel: {background:"#0d1525", border:"1px solid #2a3045", borderRadius:8, padding:"16px 18px", marginBottom:22},
+  previewHeader: {display:"flex", justifyContent:"space-between", gap:14, alignItems:"flex-start", marginBottom:14},
+  kpiGrid: {display:"grid", gridTemplateColumns:"repeat(6, minmax(110px, 1fr))", gap:10, marginBottom:14},
+  kpiCard: {background:"#080d1a", border:"1px solid #1e2535", borderRadius:7, padding:"11px 12px"},
+  chartPanel: {background:"#080d1a", border:"1px solid #1e2535", borderRadius:7, padding:"13px 14px", minHeight:220},
+  panelTitle: {fontSize:13, fontWeight:700, color:"#e8edf5", marginBottom:12},
+  emptyBox: {height:"100%", minHeight:180, display:"flex", alignItems:"center", justifyContent:"center", color:"#5b6a8a", fontSize:12, textAlign:"center"},
+  contentLine: {display:"flex", justifyContent:"space-between", gap:12, borderBottom:"1px solid #1e2535", padding:"8px 0"},
+};
+
+Object.assign(window, { ReportsModule, AlarmsModule, NotificationsModule, SettingsModule });
