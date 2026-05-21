@@ -17,13 +17,29 @@ pip install -q -r "$DIR/requirements.txt"
 
 # ── Helpers ───────────────────────────────────────────────
 is_running() {
-    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+    local pid
+    pid="$(server_pid)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+server_pid() {
+    if [ -f "$PID_FILE" ]; then
+        local saved_pid
+        saved_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+        if [ -n "$saved_pid" ] && kill -0 "$saved_pid" 2>/dev/null; then
+            echo "$saved_pid"
+            return
+        fi
+    fi
+    pgrep -f "uvicorn api:app --host 0.0.0.0 --port $PORT" | head -n 1
 }
 
 stop_server() {
     if is_running; then
-        echo "Deteniendo AUDITEC (PID $(cat "$PID_FILE"))..."
-        kill "$(cat "$PID_FILE")"
+        local pid
+        pid="$(server_pid)"
+        echo "Deteniendo AG-metrics (PID $pid)..."
+        kill "$pid"
         rm -f "$PID_FILE"
         echo "Servidor detenido."
     else
@@ -39,14 +55,14 @@ case "$MODE" in
 
   debug)
     stop_server 2>/dev/null || true
-    echo "Iniciando AUDITEC en modo DEBUG (reload automático)..."
+    echo "Iniciando AG-metrics en modo DEBUG (reload automático)..."
     cd "$DIR"
     uvicorn api:app --host 0.0.0.0 --port "$PORT" --reload --log-level debug
     ;;
 
   prod)
     stop_server 2>/dev/null || true
-    echo "Iniciando AUDITEC en modo PRODUCCIÓN (background, log: $LOG_FILE)..."
+    echo "Iniciando AG-metrics en modo PRODUCCIÓN (background, log: $LOG_FILE)..."
     cd "$DIR"
     nohup uvicorn api:app --host 0.0.0.0 --port "$PORT" --workers 2 --log-level warning \
         >> "$LOG_FILE" 2>&1 &
@@ -67,9 +83,9 @@ case "$MODE" in
 
   status)
     if is_running; then
-        echo "AUDITEC corriendo (PID $(cat "$PID_FILE")) en http://localhost:$PORT"
+        echo "AG-metrics corriendo (PID $(server_pid)) en http://localhost:$PORT"
     else
-        echo "AUDITEC detenido."
+        echo "AG-metrics detenido."
     fi
     ;;
 

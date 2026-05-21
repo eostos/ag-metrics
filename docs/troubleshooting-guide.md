@@ -1,4 +1,4 @@
-# Troubleshooting Guide — AUDITEC AVC/SAT
+# Troubleshooting Guide — AG-metrics AVC/SAT
 
 ## Quick Status Checks
 
@@ -142,7 +142,7 @@ ls ~/sat_merged/             # Are SAT merged files present?
 2. Check browser console for JavaScript errors.
 3. Force-refresh: Ctrl+Shift+R (clears browser cache).
 4. Clear Babel cache: the app auto-clears stale Babel cache on version change via `localStorage.agm_ver`.
-5. If the Reports screen shows static data: Reports uses `MockData.jsx` for its dataset — this is a known limitation.
+5. If the Reports screen is empty: verify the selected date/lane has entries in `recon_cache`; Reports uses real reconciled cache data, not raw AVC/SAT rows.
 
 ---
 

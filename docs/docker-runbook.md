@@ -1,10 +1,10 @@
-# Docker Runbook — AUDITEC AVC/SAT
+# Docker Runbook — AG-metrics AVC/SAT
 
 ## Docker Not Found in Repository
 
 No `Dockerfile`, `docker-compose.yml`, `.dockerignore`, or any Docker-related configuration was found in this repository.
 
-AUDITEC is deployed directly on the host using the `run.sh` script and a Python virtual environment. See `docs/deployment-guide.md` for deployment instructions.
+AG-metrics is deployed directly on the host using the `run.sh` script and a Python virtual environment. See `docs/deployment-guide.md` for deployment instructions.
 
 ---
 

@@ -1,4 +1,4 @@
-# Deployment Guide — AUDITEC AVC/SAT
+# Deployment Guide — AG-metrics AVC/SAT
 
 ## Prerequisites
 
@@ -111,14 +111,14 @@ systemctl status auditec-sat-watcher.service --no-pager
 | venv | `python3.8 -m venv` must work |
 | libpq (psycopg2) | `psycopg2-binary` handles this |
 | OpenSSH (paramiko) | paramiko handles SSH; no system ssh required |
-| SFTP directory | `/home/sftpuser/uploads/` — writable by SAT system, readable by AUDITEC process |
-| Merged output dir | `~/sat_merged/` — writable by AUDITEC process |
+| SFTP directory | `/home/sftpuser/uploads/` — writable by SAT system, readable by AG-metrics process |
+| Merged output dir | `~/sat_merged/` — writable by AG-metrics process |
 
 ---
 
 ## Reverse Proxy (Recommended for Production)
 
-AUDITEC does not handle TLS. Use nginx or Caddy in front:
+AG-metrics does not handle TLS. Use nginx or Caddy in front:
 
 **nginx example:**
 ```nginx

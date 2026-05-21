@@ -1,4 +1,4 @@
-# Dashboard and Reports Guide — AUDITEC AVC/SAT
+# Dashboard and Reports Guide — AG-metrics AVC/SAT
 
 ## Application Structure
 
@@ -135,16 +135,22 @@ Line chart showing match rate (%) per lane over the selected date range.
 **Daily Summary:** one row per (date, lane) with columns:
 Fecha, Carril, Total AVC, Total SAT, Coincidencias, AVC sin SAT, SAT sin AVC, % Coincidencia, Err. Ejes
 
-**Discrepancias:** same table filtered to rows where `avcOnly > 0` or `satOnly > 0`.
+**Discrepancias:** same table filtered to rows where `avcOnly > 0`, `satOnly > 0`, or `axleErr > 0`.
 
 Color coding for AVC-only column: >20 → red, >5 → orange, else gray.  
 Color coding for SAT-only column: >10 → red, >3 → blue, else gray.
 
-**Note:** The Reports screen currently uses `DAILY_SUMMARY` and `LANE_CONFIGS` from `MockData.jsx` for its data — the reports table is populated with mock/demo data, not live API data. This is a known gap.
+The Reports screen uses real data from `/api/reports/summary`, which reads `recon_cache`. A date/lane appears in Reports only after that lane/date has been reconciled.
+
+The discrepancy analysis includes:
+- Aggregate motive breakdown from `motivo_no_match`
+- Axle error totals from `nota_ejes`
+- Worst lane/day rows by discrepancy rate
+- Global detection and discrepancy rates
 
 ### Export
 
-CSV and Excel export buttons are present in the UI. Backend implementation was **not confirmed** in the repository.
+Excel export is generated client-side from the currently filtered report rows.
 
 ---
 

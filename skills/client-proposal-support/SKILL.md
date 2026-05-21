@@ -4,10 +4,10 @@
 
 Use this skill when:
 - Generating technical-commercial proposals for toll operators or concessionaires
-- Describing AUDITEC's capabilities to a prospective client
+- Describing AG-metrics capabilities to a prospective client
 - Creating a statement of work, scope of delivery, or implementation plan
 - Answering technical RFP questions based on what the system actually does
-- Comparing AUDITEC's capabilities against a client's requirements
+- Comparing AG-metrics capabilities against a client's requirements
 
 ---
 
@@ -104,7 +104,7 @@ These limitations are real and confirmed:
 2. **No automated alerting**: No email, SMS, or webhook notifications when match rates fall below thresholds.
 3. **No LPR/OCR**: Vehicle images are stored and displayed but license plate text is not extracted or compared.
 4. **No multi-plaza isolation**: Multiple plazas can be configured as separate AVC sources, but the Dashboard aggregates all lanes together with no per-plaza segmentation view.
-5. **Reports use mock data**: The Reports screen's table and chart currently use `MockData.jsx` — live report data is not yet wired to the API.
+5. **Reports depend on reconciled cache data**: The Reports screen reads `recon_cache`; dates/lanes not yet reconciled do not appear until reconciliation runs.
 6. **No export confirmed**: CSV/Excel export buttons exist in Lane Detail and Reports but their backend implementation was not confirmed.
 7. **Single node only**: No clustering or horizontal scaling. Two Uvicorn workers share a single SQLite file.
 8. **Password security**: SHA-256 hashing (not bcrypt). Acceptable for internal tools; should be disclosed for security-sensitive clients.
@@ -130,8 +130,8 @@ Based on the actual system structure, a phased delivery could be:
 - Match rate baseline establishment
 
 **Phase 3 — Reporting (Optional Enhancement)**
-- Wire Reports screen to live API data (currently mock)
-- Implement CSV/Excel export
+- Extend live Reports beyond cache summaries if raw historical report regeneration is required
+- Add signed/exportable PDF reports for formal audit delivery
 - Add automated alerts for low match rates
 
 ---
@@ -142,7 +142,7 @@ Based on the actual system structure, a phased delivery could be:
 2. How does the SAT system deliver transaction files? (SFTP JSON confirmed; other formats need parser work)
 3. What are the column names in their SAT transaction files?
 4. How many plazas and lanes? (affects performance sizing)
-5. Is the PostgreSQL accessible via SSH tunnel, or is the AUDITEC server on the same network?
+5. Is the PostgreSQL accessible via SSH tunnel, or is the AG-metrics server on the same network?
 6. What is the expected daily transaction volume per lane?
 7. Is HTTPS required? (needs reverse proxy setup)
 8. What are the expected match rate thresholds for the SLA?

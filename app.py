@@ -39,7 +39,7 @@ if "db_test_msg" not in st.session_state:
     st.session_state["db_test_msg"] = None  # O un valor prede
 
 st.set_page_config(
-    page_title="AUDITEC AVC/SAT - BD",
+    page_title="AG-metrics AVC/SAT - BD",
     page_icon="🚦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -311,10 +311,10 @@ def render_selectable_result_table(df: pd.DataFrame, show_cols: List[str], key: 
 
 init_state()
 
-st.markdown("# AUDITEC - Conciliacion AVC / SAT desde BD")
+st.markdown("# AG-metrics - Conciliacion AVC / SAT desde BD")
 
 with st.sidebar:
-    st.markdown("## AUDITEC")
+    st.markdown("## AG-metrics")
     st.markdown("AVC desde PostgreSQL + SAT desde archivo")
     st.checkbox("Debug mode", key="debug_mode")
     st.divider()

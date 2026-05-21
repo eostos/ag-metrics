@@ -1,4 +1,4 @@
-# AUDITEC AVC/SAT — AG-Metrics
+# AG-metrics AVC/SAT
 
 Plataforma de auditoría y conciliación AVC/SAT. Incluye un backend FastAPI y un frontend React servidos desde el mismo proceso.
 

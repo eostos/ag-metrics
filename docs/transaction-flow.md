@@ -1,8 +1,8 @@
-# Transaction Flow — AUDITEC AVC/SAT
+# Transaction Flow — AG-metrics AVC/SAT
 
 ## Overview
 
-Transactions enter the system from two independent sources. Neither source has a concept of the other — reconciliation happens entirely within AUDITEC.
+Transactions enter the system from two independent sources. Neither source has a concept of the other — reconciliation happens entirely within AG-metrics.
 
 ---
 

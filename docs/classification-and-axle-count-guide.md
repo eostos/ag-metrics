@@ -1,4 +1,4 @@
-# Classification and Axle Count Guide — AUDITEC AVC/SAT
+# Classification and Axle Count Guide — AG-metrics AVC/SAT
 
 ## SAT Vehicle Classification System
 

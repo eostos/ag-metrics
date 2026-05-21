@@ -1,5 +1,5 @@
 """
-AUDITEC — FastAPI backend
+AG-metrics — FastAPI backend
 Soporta dos tipos de integración AVC:
   - 'database': PostgreSQL via SSH (usa engine.py)
   - 'api':      Alice Guardian REST API
@@ -8,14 +8,22 @@ Run: uvicorn api:app --host 0.0.0.0 --port 8080 --reload
 """
 from __future__ import annotations
 
+import asyncio
 import glob
 import hashlib
+import fcntl
 import json
 import os
 import re
 import secrets
 import sqlite3
+import smtplib
+import ssl
+import textwrap
+import threading
+import time
 from datetime import date, datetime, timedelta
+from email.message import EmailMessage
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -31,6 +39,7 @@ from engine import (
     fetch_avc_dataframe,
     fetch_remote_image_bytes,
     get_event_tz,
+    ensure_settings_db,
     load_saved_settings,
     parse_date,
     reconcile,
@@ -41,7 +50,7 @@ BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 MERGED_DIR = os.path.expanduser("~/sat_merged")
 WATCH_DIR  = "/home/sftpuser/uploads"
 
-app = FastAPI(title="AUDITEC API", docs_url="/api/docs")
+app = FastAPI(title="AG-metrics API", docs_url="/api/docs")
 
 # ─────────────────────────────────────────────────────────
 # Esquema SQLite
@@ -446,6 +455,194 @@ def _load_cache(lane: str, fecha: str, source_id: int = 0):
     if not row:
         return None, None
     return json.loads(row["result_json"]), json.loads(row["summary_json"])
+
+
+def _get_app_setting_json(key: str, default: Any) -> Any:
+    ensure_settings_db()
+    with _db() as c:
+        row = c.execute("SELECT setting_value FROM app_settings WHERE setting_key=?", (key,)).fetchone()
+    if not row:
+        return default
+    try:
+        return json.loads(row["setting_value"])
+    except Exception:
+        return default
+
+
+def _set_app_setting_json(key: str, value: Any) -> None:
+    ensure_settings_db()
+    with _db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO app_settings(setting_key,setting_value,updated_at) VALUES(?,?,?)",
+            (key, json.dumps(value), _now()),
+        )
+
+
+def _default_report_email_settings() -> Dict[str, Any]:
+    cfg = load_saved_settings()
+    return {
+        "smtp": {
+            "host": "",
+            "port": 587,
+            "security": "TLS",
+            "username": "",
+            "password": "",
+            "from_email": "",
+            "from_name": "AG-metrics",
+        },
+        "recipients": [],
+        "schedule": {
+            "daily_enabled": False,
+            "daily_time": "07:00",
+            "weekly_enabled": False,
+            "weekly_day": "monday",
+            "weekly_time": "07:00",
+            "timezone": cfg.get("timezone") or "America/Mexico_City",
+        },
+    }
+
+
+def _report_email_settings() -> Dict[str, Any]:
+    base = _default_report_email_settings()
+    saved = _get_app_setting_json("report_email_settings", {})
+    if isinstance(saved, dict):
+        for section in ("smtp", "schedule"):
+            base[section].update(saved.get(section) or {})
+        if isinstance(saved.get("recipients"), list):
+            base["recipients"] = saved["recipients"]
+    return base
+
+
+def _report_pdf_bytes(title: str, report: Dict[str, Any]) -> bytes:
+    totals = report.get("totals") or {}
+    lines = [
+        title,
+        f"Periodo: {report.get('date_from')} a {report.get('date_to')}",
+        f"Fuente: {report.get('source', 'recon_cache')}",
+        "",
+        "Indicadores globales",
+        f"Total eventos: {totals.get('total', 0)}",
+        f"Coincidencias: {totals.get('matched', 0)}",
+        f"AVC sin SAT: {totals.get('avcOnly', 0)}",
+        f"SAT sin AVC: {totals.get('satOnly', 0)}",
+        f"Errores ejes: {totals.get('axleErr', 0)}",
+        f"Tasa deteccion: {totals.get('matchRate', 0)}%",
+        f"Discrepancias: {totals.get('discrepancyCount', 0)} ({totals.get('discrepancyRate', 0)}%)",
+        "",
+        "Motivos principales",
+    ]
+    for item in (report.get("motive_breakdown") or [])[:10]:
+        lines.append(f"- {item.get('motivo')}: {item.get('count')}")
+    lines.extend(["", "Peores carriles/dias"])
+    for row in (report.get("worst_rows") or [])[:10]:
+        lines.append(
+            f"- {row.get('date')} {row.get('lane')}: {row.get('discrepancyRate')}% "
+            f"({row.get('discrepancyCount')} casos)"
+        )
+    lines.extend(["", "Resumen por carril"])
+    for row in (report.get("rows") or [])[:18]:
+        lines.append(
+            f"{row.get('date')} | {row.get('lane')} | total {row.get('total')} | "
+            f"match {row.get('matchRate')}% | AVC {row.get('avcOnly')} | SAT {row.get('satOnly')} | ejes {row.get('axleErr')}"
+        )
+
+    wrapped: List[str] = []
+    for line in lines:
+        wrapped.extend(textwrap.wrap(str(line), width=92) or [""])
+    wrapped = wrapped[:58]
+
+    content_lines = ["BT", "/F1 10 Tf", "50 790 Td", "14 TL"]
+    for line in wrapped:
+        safe = str(line).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        content_lines.append(f"({safe}) Tj")
+        content_lines.append("T*")
+    content_lines.append("ET")
+    stream = "\n".join(content_lines).encode("latin-1", errors="replace")
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{idx} 0 obj\n".encode())
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode())
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode())
+    pdf.extend(f"trailer << /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return bytes(pdf)
+
+
+def _smtp_error_msg(exc: Exception) -> str:
+    """Traduce excepciones SMTP/SSL/red a mensajes legibles en español."""
+    import socket
+    name = type(exc).__name__
+    raw = str(exc)
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return f"Credenciales rechazadas por el servidor — verifica usuario y contraseña SMTP ({raw})"
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        refused = ", ".join(exc.recipients.keys()) if hasattr(exc, "recipients") else raw
+        return f"El servidor rechazó el destinatario: {refused}"
+    if isinstance(exc, smtplib.SMTPSenderRefused):
+        return f"El servidor rechazó el remitente '{exc.sender}' — verifica From email"
+    if isinstance(exc, smtplib.SMTPConnectError):
+        return f"No se pudo conectar al servidor SMTP ({raw})"
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return "El servidor SMTP cerró la conexión — posible conflicto puerto/seguridad (¿SSL en puerto 465 o TLS en 587?)"
+    if isinstance(exc, smtplib.SMTPException):
+        return f"Error SMTP: {raw}"
+    if isinstance(exc, ssl.SSLError):
+        return f"Error SSL/TLS — verifica que el modo de seguridad coincida con el puerto ({raw})"
+    if isinstance(exc, (ConnectionRefusedError, OSError)) and "refused" in raw.lower():
+        return f"Conexión rechazada — verifica host y puerto SMTP ({raw})"
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "Timeout de conexión — el host SMTP no responde en ese puerto"
+    if isinstance(exc, ValueError):
+        return str(exc)
+    return f"{name}: {raw}"
+
+
+def _send_report_email(settings: Dict[str, Any], recipients: List[str], subject: str,
+                       body: str, pdf_name: str, pdf_bytes: bytes) -> None:
+    smtp = settings.get("smtp") or {}
+    host = str(smtp.get("host") or "").strip()
+    if not host:
+        raise ValueError("SMTP host no configurado")
+    port = int(smtp.get("port") or 587)
+    security = str(smtp.get("security") or "TLS").upper()
+    from_email = str(smtp.get("from_email") or smtp.get("username") or "").strip()
+    if not from_email:
+        raise ValueError("From email no configurado")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"{smtp.get('from_name') or 'AG-metrics'} <{from_email}>"
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(body)
+    msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_name)
+
+    username = smtp.get("username") or ""
+    password = smtp.get("password") or ""
+    if security == "SSL":
+        with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=30) as server:
+            if username:
+                server.login(username, password)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port, timeout=30) as server:
+            if security == "TLS":
+                server.starttls(context=ssl.create_default_context())
+            if username:
+                server.login(username, password)
+            server.send_message(msg)
 
 
 # ─────────────────────────────────────────────────────────
@@ -1046,6 +1243,255 @@ def list_cache(user=Depends(_get_user)):
     return result
 
 
+@app.get("/api/reports/summary")
+def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_get_user)):
+    """Real report data from reconciliation cache, grouped by date and lane."""
+    cfg = load_saved_settings()
+    today = datetime.now(get_event_tz(cfg)).date()
+    if not date_to:
+        date_to = today.isoformat()
+    if not date_from:
+        date_from = (today - timedelta(days=13)).isoformat()
+
+    try:
+        d_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+        d_to = datetime.strptime(date_to, "%Y-%m-%d").date()
+    except Exception:
+        raise HTTPException(status_code=400, detail="date_from/date_to deben usar YYYY-MM-DD")
+    if d_from > d_to:
+        raise HTTPException(status_code=400, detail="date_from no puede ser mayor que date_to")
+
+    with _db() as c:
+        rows = c.execute(
+            "SELECT cache_key,result_json,summary_json,source_id,created_at FROM recon_cache ORDER BY cache_key"
+        ).fetchall()
+
+    report_rows: List[Dict[str, Any]] = []
+    totals = {"total":0, "matched":0, "avcOnly":0, "satOnly":0, "axleErr":0}
+    discrepancy_totals: Dict[str, int] = {}
+    class_totals: Dict[str, Dict[str, int]] = {}
+    worst_rows: List[Dict[str, Any]] = []
+
+    for r in rows:
+        parts = r["cache_key"].split("::", 2)
+        if len(parts) == 3:
+            source_id, lane, fecha = parts
+        else:
+            source_id = str(r["source_id"] or 0)
+            lane = parts[0] if parts else ""
+            fecha = parts[-1] if parts else ""
+        try:
+            row_date = datetime.strptime(fecha, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if row_date < d_from or row_date > d_to:
+            continue
+
+        try:
+            summary = json.loads(r["summary_json"] or "{}")
+        except Exception:
+            summary = {}
+        try:
+            events = json.loads(r["result_json"] or "[]")
+        except Exception:
+            events = []
+
+        total = int(summary.get("total") or 0)
+        matched = int(summary.get("matched") or 0)
+        avc_only = int(summary.get("avcOnly") or 0)
+        sat_only = int(summary.get("satOnly") or 0)
+        axle_err = int(summary.get("axleErr") or 0)
+        match_rate = float(summary.get("matchRate") or 0)
+        discrepancy_count = avc_only + sat_only + axle_err
+        discrepancy_rate = round(discrepancy_count / max(total, 1) * 100, 1)
+
+        motive_counts: Dict[str, int] = {}
+        class_mismatch = 0
+        for ev in events:
+            tipo = ev.get("tipo", "")
+            motivo = str(ev.get("motivo_no_match") or "")
+            nota = str(ev.get("nota_ejes") or "")
+            if motivo:
+                motive_counts[motivo] = motive_counts.get(motivo, 0) + 1
+                discrepancy_totals[motivo] = discrepancy_totals.get(motivo, 0) + 1
+            if motivo == "clase_distinta":
+                class_mismatch += 1
+            if tipo in ("MATCH", "AVC"):
+                cls = str(ev.get("clase_avc_mapeada") or "")
+                if cls and cls not in ("0", "nan", "None"):
+                    class_totals.setdefault(cls, {"avc":0, "sat":0})
+                    class_totals[cls]["avc"] += 1
+            if tipo in ("MATCH", "SAT"):
+                sc = str(ev.get("id_classe") or "0")
+                tc = str(ev.get("tab_id_classe") or "0")
+                eff = tc if sc in ("", "0", "0.0", "nan", "None") else sc
+                try:
+                    eff = str(int(float(eff)))
+                except Exception:
+                    eff = ""
+                if eff:
+                    class_totals.setdefault(eff, {"avc":0, "sat":0})
+                    class_totals[eff]["sat"] += 1
+            if nota.startswith("ERROR"):
+                discrepancy_totals["ERROR_DETECCION_EJES_AVC"] = discrepancy_totals.get("ERROR_DETECCION_EJES_AVC", 0) + 1
+
+        row = {
+            "date": fecha,
+            "lane": lane,
+            "source_id": source_id,
+            "total": total,
+            "matched": matched,
+            "avcOnly": avc_only,
+            "satOnly": sat_only,
+            "axleErr": axle_err,
+            "matchRate": match_rate,
+            "discrepancyCount": discrepancy_count,
+            "discrepancyRate": discrepancy_rate,
+            "classMismatch": class_mismatch,
+            "motives": motive_counts,
+            "created_at": r["created_at"],
+        }
+        report_rows.append(row)
+        worst_rows.append(row)
+        for key in totals:
+            totals[key] += int(row[key])
+
+    totals["matchRate"] = round((totals["total"] - totals["satOnly"]) / max(totals["total"], 1) * 100, 1)
+    totals["discrepancyCount"] = totals["avcOnly"] + totals["satOnly"] + totals["axleErr"]
+    totals["discrepancyRate"] = round(totals["discrepancyCount"] / max(totals["total"], 1) * 100, 1)
+
+    worst_rows = sorted(
+        worst_rows,
+        key=lambda x: (x["discrepancyRate"], x["discrepancyCount"]),
+        reverse=True,
+    )[:10]
+    motive_breakdown = [
+        {"motivo": k, "count": v}
+        for k, v in sorted(discrepancy_totals.items(), key=lambda item: item[1], reverse=True)
+    ]
+    class_breakdown = [
+        {"class_id": k, "avc": v["avc"], "sat": v["sat"], "delta": v["avc"] - v["sat"]}
+        for k, v in sorted(class_totals.items(), key=lambda item: int(float(item[0])) if str(item[0]).isdigit() else 999)
+    ]
+    lanes = sorted({r["lane"] for r in report_rows if r["lane"]})
+    dates = sorted({r["date"] for r in report_rows if r["date"]})
+    return {
+        "date_from": d_from.isoformat(),
+        "date_to": d_to.isoformat(),
+        "rows": report_rows,
+        "totals": totals,
+        "lanes": lanes,
+        "dates": dates,
+        "motive_breakdown": motive_breakdown,
+        "class_breakdown": class_breakdown,
+        "worst_rows": worst_rows,
+        "source": "recon_cache",
+    }
+
+
+def _send_configured_report(report_type: str, date_from: str, date_to: str) -> Dict[str, Any]:
+    settings = _report_email_settings()
+    recipients = [
+        r.get("email") for r in settings.get("recipients", [])
+        if r.get("enabled", True) and report_type in (r.get("report_types") or [])
+    ]
+    recipients = [r for r in recipients if r]
+    if not recipients:
+        raise ValueError(f"Sin destinatarios activos para reporte {report_type}")
+    report = get_reports_summary(date_from, date_to, user={"id": 0})
+    title = f"Reporte AG-metrics {report_type.upper()}"
+    pdf = _report_pdf_bytes(title, report)
+    _send_report_email(
+        settings,
+        recipients,
+        f"{title} | {date_from} a {date_to}",
+        "Adjunto encontrarás el reporte PDF generado automáticamente por AG-metrics.",
+        f"ag-metrics-{report_type}-{date_from}-{date_to}.pdf",
+        pdf,
+    )
+    return {"ok": True, "sent": len(recipients), "recipients": recipients}
+
+
+@app.get("/api/report-email/settings")
+def get_report_email_settings(user=Depends(_require_admin)):
+    return _report_email_settings()
+
+
+@app.post("/api/report-email/settings")
+async def save_report_email_settings(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    current = _report_email_settings()
+    current["smtp"].update(body.get("smtp") or {})
+    current["schedule"].update(body.get("schedule") or {})
+    if isinstance(body.get("recipients"), list):
+        current["recipients"] = body["recipients"]
+    _set_app_setting_json("report_email_settings", current)
+    return {"ok": True}
+
+
+@app.post("/api/report-email/test")
+async def send_test_report_email(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    settings = _report_email_settings()
+    to_email = (body.get("to") or user.get("email") or settings["smtp"].get("from_email") or "").strip()
+    if not to_email:
+        raise HTTPException(400, "Escribe un correo de destino antes de enviar la prueba")
+    if not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', to_email):
+        raise HTTPException(400, f"Correo inválido: {to_email}")
+    pdf = _report_pdf_bytes("Prueba de correo AG-metrics", {
+        "date_from": date.today().isoformat(),
+        "date_to": date.today().isoformat(),
+        "source": "test",
+        "totals": {"total": 0, "matched": 0, "avcOnly": 0, "satOnly": 0, "axleErr": 0, "matchRate": 0, "discrepancyCount": 0, "discrepancyRate": 0},
+        "motive_breakdown": [],
+        "worst_rows": [],
+        "rows": [],
+    })
+    try:
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _send_report_email(
+                settings, [to_email], "AG-metrics - prueba SMTP",
+                "Este es un correo de prueba de configuración SMTP de AG-metrics.",
+                "ag-metrics-prueba.pdf", pdf,
+            )),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(400, "Timeout: el servidor SMTP no respondió en 20 segundos — verifica host y puerto")
+    except Exception as exc:
+        raise HTTPException(400, _smtp_error_msg(exc))
+    return {"ok": True, "sent_to": to_email}
+
+
+@app.post("/api/report-email/send-now")
+async def send_report_now(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    report_type = body.get("report_type") or "daily"
+    cfg = load_saved_settings()
+    today = datetime.now(get_event_tz(cfg)).date()
+    date_to = body.get("date_to") or today.isoformat()
+    if body.get("date_from"):
+        date_from = body["date_from"]
+    elif report_type == "weekly":
+        date_from = (today - timedelta(days=6)).isoformat()
+    elif report_type == "monthly":
+        date_from = today.replace(day=1).isoformat()
+    else:
+        date_from = date_to
+    try:
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _send_configured_report(report_type, date_from, date_to)),
+            timeout=20.0,
+        )
+        return result
+    except asyncio.TimeoutError:
+        raise HTTPException(400, "Timeout: el servidor SMTP no respondió en 20 segundos — verifica host y puerto")
+    except Exception as exc:
+        raise HTTPException(400, _smtp_error_msg(exc))
+
+
 # ─────────────────────────────────────────────────────────
 # Merge SAT
 # ─────────────────────────────────────────────────────────
@@ -1183,6 +1629,59 @@ async def update_user(uid: int, request: Request, user=Depends(_require_admin)):
     return {"ok": True}
 
 
+_REPORT_SCHED_LOCK_FH = None
+
+def _weekday_key(dt: datetime) -> str:
+    return ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"][dt.weekday()]
+
+
+def _report_scheduler_loop() -> None:
+    while True:
+        try:
+            settings = _report_email_settings()
+            schedule = settings.get("schedule") or {}
+            tz = get_event_tz({"timezone": schedule.get("timezone") or "America/Mexico_City"})
+            now = datetime.now(tz)
+            last_sent = _get_app_setting_json("report_email_last_sent", {})
+
+            def mark_sent(key: str):
+                last_sent[key] = now.strftime("%Y-%m-%d")
+                _set_app_setting_json("report_email_last_sent", last_sent)
+
+            if schedule.get("daily_enabled") and now.strftime("%H:%M") == (schedule.get("daily_time") or "07:00"):
+                key = "daily"
+                if last_sent.get(key) != now.strftime("%Y-%m-%d"):
+                    day = (now.date() - timedelta(days=1)).isoformat()
+                    _send_configured_report("daily", day, day)
+                    mark_sent(key)
+
+            if (
+                schedule.get("weekly_enabled")
+                and _weekday_key(now) == (schedule.get("weekly_day") or "monday")
+                and now.strftime("%H:%M") == (schedule.get("weekly_time") or "07:00")
+            ):
+                key = "weekly"
+                if last_sent.get(key) != now.strftime("%Y-%m-%d"):
+                    end_day = now.date() - timedelta(days=1)
+                    start_day = end_day - timedelta(days=6)
+                    _send_configured_report("weekly", start_day.isoformat(), end_day.isoformat())
+                    mark_sent(key)
+        except Exception:
+            pass
+        time.sleep(60)
+
+
+def _start_report_scheduler_once() -> None:
+    global _REPORT_SCHED_LOCK_FH
+    try:
+        _REPORT_SCHED_LOCK_FH = open("/tmp/auditec_report_scheduler.lock", "w")
+        fcntl.flock(_REPORT_SCHED_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        return
+    t = threading.Thread(target=_report_scheduler_loop, daemon=True)
+    t.start()
+
+
 # ─────────────────────────────────────────────────────────
 # Startup + static
 # ─────────────────────────────────────────────────────────
@@ -1190,6 +1689,7 @@ async def update_user(uid: int, request: Request, user=Depends(_require_admin)):
 @app.on_event("startup")
 def startup():
     _ensure_schema()
+    _start_report_scheduler_once()
 
 frontend_dir = os.path.join(BASE_DIR, "frontend")
 

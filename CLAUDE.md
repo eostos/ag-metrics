@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-AUDITEC AVC/SAT is a toll auditing platform. It reconciles AVC vehicle detection events against SAT toll transactions, per lane, per date. The core logic lives in `engine.py`. The API is in `api.py` (FastAPI). The frontend is in `frontend/` (React 18, no build step). The local store is SQLite (`app_settings.db`).
+AG-metrics AVC/SAT is a toll auditing platform. It reconciles AVC vehicle detection events against SAT toll transactions, per lane, per date. The core logic lives in `engine.py`. The API is in `api.py` (FastAPI). The frontend is in `frontend/` (React 18, no build step). The local store is SQLite (`app_settings.db`).
 
 Read `PROJECT_CONTEXT.md` before working on any task.
 

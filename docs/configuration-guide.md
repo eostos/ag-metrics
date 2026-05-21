@@ -1,8 +1,8 @@
-# Configuration Guide — AUDITEC AVC/SAT
+# Configuration Guide — AG-metrics AVC/SAT
 
 ## Overview
 
-AUDITEC has three layers of configuration:
+AG-metrics has three layers of configuration:
 
 1. **Environment variables** (`.env` file, optional) — database/SSH defaults
 2. **SQLite settings** (`app_settings` table) — persistent runtime config
@@ -147,7 +147,7 @@ These paths are hardcoded in `api.py` and `sat_watcher.py`. Changing them requir
 
 ## Timezone Configuration
 
-AUDITEC normalizes all timestamps to a single configured timezone before comparison. This is critical because:
+AG-metrics normalizes all timestamps to a single configured timezone before comparison. This is critical because:
 - AVC timestamps may be stored in UTC in PostgreSQL.
 - SAT timestamps are typically local time.
 - The date filter for AVC events uses the configured timezone to determine what "today" means.

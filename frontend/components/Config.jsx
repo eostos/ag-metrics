@@ -860,16 +860,220 @@ function SistemaConfig() {
   );
 }
 
+function ReportEmailSettings() {
+  const emptySettings = {
+    smtp: {host:"", port:587, security:"TLS", username:"", password:"", from_email:"", from_name:"AG-metrics"},
+    recipients: [],
+    schedule: {daily_enabled:false, daily_time:"07:00", weekly_enabled:false, weekly_day:"monday", weekly_time:"07:00", timezone:"America/Mexico_City"},
+  };
+  const [settings, setSettings] = React.useState(emptySettings);
+  const [users, setUsers] = React.useState([]);
+  const [newRecipient, setNewRecipient] = React.useState({email:"", name:"", report_types:["daily"], enabled:true});
+  const [saving, setSaving] = React.useState(false);
+  const [msg, setMsg] = React.useState("");
+  const [testTo, setTestTo] = React.useState("");
+  const [sending, setSending] = React.useState("");
+
+  React.useEffect(() => {
+    window.API.get("/api/report-email/settings").then(d => setSettings({...emptySettings, ...d, smtp:{...emptySettings.smtp, ...(d.smtp||{})}, schedule:{...emptySettings.schedule, ...(d.schedule||{})}})).catch(()=>{});
+    window.API.get("/api/users").then(d => setUsers(Array.isArray(d)?d:[])).catch(()=>{});
+  }, []);
+
+  const setSmtp = (k,v) => setSettings(p=>({...p, smtp:{...p.smtp, [k]:v}}));
+  const setSchedule = (k,v) => setSettings(p=>({...p, schedule:{...p.schedule, [k]:v}}));
+
+  function toggleType(rec, type) {
+    const current = rec.report_types || [];
+    return current.includes(type) ? current.filter(t=>t!==type) : [...current, type];
+  }
+
+  function addRecipient() {
+    const email = newRecipient.email.trim();
+    if (!email) return;
+    setSettings(p=>({...p, recipients:[...(p.recipients||[]), {...newRecipient, email}]}));
+    setNewRecipient({email:"", name:"", report_types:["daily"], enabled:true});
+  }
+
+  function updateRecipient(idx, patch) {
+    setSettings(p=>({...p, recipients:(p.recipients||[]).map((r,i)=>i===idx?{...r,...patch}:r)}));
+  }
+
+  function removeRecipient(idx) {
+    setSettings(p=>({...p, recipients:(p.recipients||[]).filter((_,i)=>i!==idx)}));
+  }
+
+  function save() {
+    setSaving(true); setMsg("");
+    window.API.post("/api/report-email/settings", settings)
+      .then(()=>{ setMsg("Guardado"); setTimeout(()=>setMsg(""),2500); })
+      .catch(e=>setMsg(e.message||"Error al guardar"))
+      .finally(()=>setSaving(false));
+  }
+
+  function sendTest() {
+    const email = testTo.trim();
+    if (!email) { setMsg("Escribe un correo de destino"); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setMsg("Correo inválido: " + email); return; }
+    setSending("test"); setMsg("");
+    const clientTimeout = new Promise((_,rej) =>
+      setTimeout(() => rej(new Error("Sin respuesta del servidor (25s) — revisa tu SMTP")), 25000)
+    );
+    Promise.race([window.API.post("/api/report-email/test", {to: email}), clientTimeout])
+      .then(r => setMsg("✓ Correo enviado a " + r.sent_to))
+      .catch(e => setMsg(e.message || "Error enviando prueba"))
+      .finally(() => setSending(""));
+  }
+
+  function sendNow(type) {
+    setSending(type); setMsg("");
+    window.API.post("/api/report-email/send-now", {report_type:type})
+      .then(r=>setMsg(`Reporte ${type} enviado a ${r.sent} destinatario(s)`))
+      .catch(e=>setMsg(e.message||"Error enviando reporte"))
+      .finally(()=>setSending(""));
+  }
+
+  const reportTypes = [
+    {id:"daily", label:"Diario"},
+    {id:"weekly", label:"Semanal"},
+    {id:"monthly", label:"Mensual"},
+    {id:"critical", label:"Alarmas críticas"},
+  ];
+  const weekDays = [
+    ["monday","Lunes"],["tuesday","Martes"],["wednesday","Miércoles"],["thursday","Jueves"],
+    ["friday","Viernes"],["saturday","Sábado"],["sunday","Domingo"],
+  ];
+
+  return (
+    <div>
+      <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#e8edf5",marginBottom:14}}>SMTP</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 120px 150px",gap:"0 14px"}}>
+          <FormField label="SMTP host" value={settings.smtp.host||""} onChange={v=>setSmtp("host",v)} placeholder="smtp.empresa.com"/>
+          <FormField label="SMTP port" type="number" value={settings.smtp.port||""} onChange={v=>setSmtp("port",v)} placeholder="587"/>
+          <div style={{marginBottom:18}}>
+            <label style={cfgStyles.label}>Seguridad</label>
+            <select value={settings.smtp.security||"TLS"} onChange={e=>setSmtp("security",e.target.value)} style={cfgStyles.select}>
+              <option value="TLS">TLS</option><option value="SSL">SSL</option><option value="None">None</option>
+            </select>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 14px"}}>
+          <FormField label="SMTP username" value={settings.smtp.username||""} onChange={v=>setSmtp("username",v)}/>
+          <FormField label="SMTP password" value={settings.smtp.password||""} onChange={v=>setSmtp("password",v)} masked/>
+          <FormField label="From email" value={settings.smtp.from_email||""} onChange={v=>setSmtp("from_email",v)} placeholder="reportes@empresa.com"/>
+          <FormField label="From name" value={settings.smtp.from_name||""} onChange={v=>setSmtp("from_name",v)} placeholder="AG-metrics Reportes"/>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+          <div style={{width:280}}>
+            <FormField label="Destinatario prueba" value={testTo} onChange={setTestTo} placeholder="correo@empresa.com"/>
+          </div>
+          <button onClick={sendTest} disabled={sending==="test"} style={{...cfgStyles.actionBtn,marginBottom:18,color:"#5b9cf6",borderColor:"rgba(91,156,246,0.35)"}}>
+            {sending==="test"?"Enviando...":"Send Test Email"}
+          </button>
+        </div>
+      </div>
+
+      <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#e8edf5",marginBottom:14}}>Destinatarios</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          <input value={newRecipient.name} onChange={e=>setNewRecipient(p=>({...p,name:e.target.value}))} placeholder="Nombre" style={cfgStyles.input}/>
+          <input value={newRecipient.email} onChange={e=>setNewRecipient(p=>({...p,email:e.target.value}))} placeholder="correo@empresa.com" style={cfgStyles.input}/>
+        </div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+          {users.map(u=>(
+            <button key={u.id} onClick={()=>setNewRecipient(p=>({...p,email:u.email,name:u.name}))} style={cfgStyles.chipBtn}>{u.email}</button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:14}}>
+          {reportTypes.map(t=>(
+            <label key={t.id} style={{display:"flex",gap:6,alignItems:"center",fontSize:12,color:"#c8d4e8"}}>
+              <input type="checkbox" checked={(newRecipient.report_types||[]).includes(t.id)}
+                onChange={()=>setNewRecipient(p=>({...p,report_types:toggleType(p,t.id)}))}/>
+              {t.label}
+            </label>
+          ))}
+          <button onClick={addRecipient} style={cfgStyles.saveBtn}>Agregar destinatario</button>
+        </div>
+
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {(settings.recipients||[]).map((r,idx)=>(
+            <div key={`${r.email}-${idx}`} style={{display:"grid",gridTemplateColumns:"1.2fr 1.4fr 90px 32px",gap:8,alignItems:"center",background:"#0d1525",border:"1px solid #1e2535",borderRadius:8,padding:"9px 12px"}}>
+              <div>
+                <div style={{fontSize:13,color:"#e8edf5",fontWeight:600}}>{r.name||r.email}</div>
+                <div style={{fontSize:11,color:"#5b6a8a"}}>{r.email}</div>
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {reportTypes.map(t=>(
+                  <label key={t.id} style={{display:"flex",gap:4,alignItems:"center",fontSize:11,color:"#8a9ab5"}}>
+                    <input type="checkbox" checked={(r.report_types||[]).includes(t.id)}
+                      onChange={()=>updateRecipient(idx,{report_types:toggleType(r,t.id)})}/>
+                    {t.label}
+                  </label>
+                ))}
+              </div>
+              <Toggle checked={r.enabled!==false} onChange={v=>updateRecipient(idx,{enabled:v})}/>
+              <button onClick={()=>removeRecipient(idx)} style={{...cfgStyles.actionBtn,padding:"4px 8px",color:"#ff4c6a"}}>×</button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#e8edf5",marginBottom:14}}>Programación</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16}}>
+          <div style={cfgStyles.scheduleBox}>
+            <Toggle checked={!!settings.schedule.daily_enabled} onChange={v=>setSchedule("daily_enabled",v)} label="Reporte diario"/>
+            <FormField label="Hora diaria" type="time" value={settings.schedule.daily_time||"07:00"} onChange={v=>setSchedule("daily_time",v)}/>
+          </div>
+          <div style={cfgStyles.scheduleBox}>
+            <Toggle checked={!!settings.schedule.weekly_enabled} onChange={v=>setSchedule("weekly_enabled",v)} label="Reporte semanal"/>
+            <div style={{marginBottom:18}}>
+              <label style={cfgStyles.label}>Día de semana</label>
+              <select value={settings.schedule.weekly_day||"monday"} onChange={e=>setSchedule("weekly_day",e.target.value)} style={cfgStyles.select}>
+                {weekDays.map(([id,label])=><option key={id} value={id}>{label}</option>)}
+              </select>
+            </div>
+            <FormField label="Hora semanal" type="time" value={settings.schedule.weekly_time||"07:00"} onChange={v=>setSchedule("weekly_time",v)}/>
+          </div>
+          <div style={cfgStyles.scheduleBox}>
+            <FormField label="Timezone" value={settings.schedule.timezone||"America/Mexico_City"} onChange={v=>setSchedule("timezone",v)}/>
+            <button onClick={()=>sendNow("daily")} disabled={!!sending} style={{...cfgStyles.saveBtn,width:"100%",marginBottom:8}}>
+              {sending==="daily"?"Enviando...":"Generate Report Now"}
+            </button>
+            <button onClick={()=>sendNow("weekly")} disabled={!!sending} style={{...cfgStyles.actionBtn,width:"100%",color:"#5b9cf6",borderColor:"rgba(91,156,246,0.35)"}}>
+              Enviar semanal ahora
+            </button>
+            <button onClick={()=>sendNow("monthly")} disabled={!!sending} style={{...cfgStyles.actionBtn,width:"100%",marginTop:8,color:"#a78bfa",borderColor:"rgba(167,139,250,0.35)"}}>
+              Enviar mensual ahora
+            </button>
+            <button onClick={()=>sendNow("critical")} disabled={!!sending} style={{...cfgStyles.actionBtn,width:"100%",marginTop:8,color:"#ff4c6a",borderColor:"rgba(255,76,106,0.35)"}}>
+              Enviar alarmas ahora
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:12,alignItems:"center"}}>
+        <button onClick={save} disabled={saving} style={{...cfgStyles.saveBtn,opacity:saving?0.7:1}}>
+          {saving?"Guardando...":"Guardar Report Email Settings"}
+        </button>
+        {msg && <span style={{fontSize:12,color:msg.includes("Error")?"#ff4c6a":"#22c97b"}}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
 const CONFIG_TABS = [
   { id:"fuentes", label:"Fuentes AVC",          icon:"📡" },
   { id:"sat",     label:"Integración SAT",      icon:"💳" },
+  { id:"report_email", label:"Report Email Settings", icon:"✉️" },
   { id:"sistema", label:"Sistema",              icon:"⚙️" },
   { id:"users",   label:"Usuarios y Permisos",  icon:"👥" },
 ];
 
 function ConfigScreen() {
   const [activeTab, setActiveTab] = React.useState("fuentes");
-  const tabContent = { fuentes:<AVCSourcesConfig/>, sat:<SATConfig/>, sistema:<SistemaConfig/>, users:<UsersConfig/> };
+  const tabContent = { fuentes:<AVCSourcesConfig/>, sat:<SATConfig/>, report_email:<ReportEmailSettings/>, sistema:<SistemaConfig/>, users:<UsersConfig/> };
 
   return (
     <div style={{display:"flex", gap:0, height:"100%"}}>
@@ -897,6 +1101,7 @@ function ConfigScreen() {
         <div style={{fontSize:12, color:"#5b6a8a", marginBottom:24}}>
           {activeTab==="fuentes"&&"Sistemas AVC conectados — PostgreSQL/SSH o Alice API REST"}
           {activeTab==="sat"&&"Fuente de datos del Sistema de Administración de Tráfico"}
+          {activeTab==="report_email"&&"SMTP, destinatarios y programación automática de reportes PDF"}
           {activeTab==="sistema"&&"Zona horaria, mapeo de carriles AVC ↔ SAT y parámetros globales"}
           {activeTab==="users"&&"Gestión de usuarios y niveles de acceso"}
         </div>
@@ -928,6 +1133,13 @@ const cfgStyles = {
   actionBtn: {
     background:"none", border:"1px solid #2a3045", borderRadius:5, padding:"4px 10px",
     color:"#7a8aaa", fontSize:11, cursor:"pointer", fontFamily:"inherit",
+  },
+  chipBtn: {
+    background:"#1e2535", border:"1px solid #2a3045", borderRadius:6,
+    padding:"4px 10px", color:"#7a8aaa", fontSize:11, cursor:"pointer", fontFamily:"inherit",
+  },
+  scheduleBox: {
+    background:"#0d1525", border:"1px solid #1e2535", borderRadius:8, padding:"12px 14px",
   },
 };
 

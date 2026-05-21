@@ -35,7 +35,7 @@ for line in sys.stdin:
 ### Step 2: Test the API Connection
 
 ```bash
-# Via AUDITEC's test endpoint (safest method — uses stored config)
+# Via AG-metrics test endpoint (safest method — uses stored config)
 curl -s -X POST http://localhost:8080/api/sources/1/test \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{}' | python3 -m json.tool
@@ -73,7 +73,7 @@ if not df.empty:
 
 ### Step 4: Schema Review (API Response)
 
-Check if the API response structure matches what AUDITEC expects:
+Check if the API response structure matches what AG-metrics expects:
 - Is there a top-level array, or is it nested under a key?
 - What is the key name for the events array? (configure `events_key`)
 - What are the field names for: id, lane, vehicle_type, axle_count, timestamp?

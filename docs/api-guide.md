@@ -1,4 +1,4 @@
-# API Guide — AUDITEC AVC/SAT
+# API Guide — AG-metrics AVC/SAT
 
 Base URL: `http://localhost:8080`  
 Interactive docs: `http://localhost:8080/api/docs`  
@@ -167,6 +167,31 @@ Response:
 
 ### GET /api/reconcile/cache
 Lists all entries in the reconciliation cache with summary stats.
+
+### GET /api/reports/summary?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+Returns real report data from `recon_cache` for the selected date range.
+
+Includes:
+- `rows`: one row per reconciled lane/date
+- `totals`: aggregate KPIs
+- `motive_breakdown`: discrepancy causes from `motivo_no_match`
+- `worst_rows`: lane/date rows with highest discrepancy rates
+- `class_breakdown`: AVC vs SAT class totals from cached result rows
+
+Dates/lanes not yet reconciled are not included.
+
+### GET /api/report-email/settings — Admin only
+Returns SMTP, recipient, and schedule settings for automated PDF report emails.
+
+### POST /api/report-email/settings — Admin only
+Saves SMTP config, recipients, and daily/weekly schedule.
+
+### POST /api/report-email/test — Admin only
+Sends a test email with a small PDF attachment using the saved SMTP settings.
+
+### POST /api/report-email/send-now — Admin only
+Generates and emails a PDF report immediately. Request fields:
+`report_type` (`daily`, `weekly`, `monthly`, `critical`), optional `date_from`, optional `date_to`.
 
 ### GET /api/class-summary?query_date=YYYY-MM-DD
 Returns AVC vs SAT class distribution aggregated from the reconciliation cache.

@@ -1,4 +1,4 @@
-# Database Guide — AUDITEC AVC/SAT
+# Database Guide — AG-metrics AVC/SAT
 
 ## Local Database: SQLite
 

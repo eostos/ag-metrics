@@ -1,8 +1,8 @@
-# PROJECT_CONTEXT.md — AUDITEC AVC/SAT (AG-Metrics)
+# PROJECT_CONTEXT.md — AG-metrics AVC/SAT
 
 ## What This Project Does
 
-AUDITEC is a **toll transaction auditing and reconciliation platform** developed by AG-Metrics for the Ebenezer / Alice Guardian ecosystem. It compares two independent sources of vehicle-crossing data — the **AVC system** (Automatic Vehicle Classification) and the **SAT system** (Sistema de Administración de Tráfico) — to detect discrepancies, count mismatches, and verify vehicle classification consistency at toll plazas.
+AG-metrics is a **toll transaction auditing and reconciliation platform** developed by AG-metrics for the Ebenezer / Alice Guardian ecosystem. It compares two independent sources of vehicle-crossing data — the **AVC system** (Automatic Vehicle Classification) and the **SAT system** (Sistema de Administración de Tráfico) — to detect discrepancies, count mismatches, and verify vehicle classification consistency at toll plazas.
 
 The system does **not** process live video, RTSP streams, or run inference models. All data arrives as structured records: AVC events from a PostgreSQL database or a REST API, SAT transactions from JSON files delivered via SFTP.
 
@@ -32,7 +32,7 @@ This reconciliation process produces an audit trail per lane, per date, with det
 | External AVC DB | PostgreSQL (`alice_guardian` schema) via SSH tunnel (sshtunnel + paramiko) |
 | External AVC API | Alice Guardian REST API (optional integration type) |
 | Frontend | React 18 + Chart.js, served by FastAPI as static files — **no build step**, uses Babel standalone in the browser |
-| Entry point | `api.py` → FastAPI app → serves `frontend/AUDITEC.html` |
+| Entry point | `api.py` -> FastAPI app -> serves `frontend/AUDITEC.html` |
 | Port | 8080 |
 
 ---
@@ -61,7 +61,8 @@ This reconciliation process produces an audit trail per lane, per date, with det
 ### 4. Audit Result Review
 - Lane Detail shows all events per lane filtered by: All / Matches / AVC-only / SAT-only / Axle Errors.
 - Evidence panel shows AVC vehicle image (proxied via SSH from remote media path).
-- Reports screen UI shows daily summaries and discrepancy reports, but its dataset is currently driven by `frontend/components/MockData.jsx`; live report API wiring is not confirmed.
+- Reports screen uses `/api/reports/summary` for real data from `recon_cache`, with global KPIs, discrepancy motive breakdown, worst lane/day rows, and Excel export.
+- Admin Config includes Report Email Settings for SMTP, recipients by report type, daily/weekly schedules, test email, and immediate PDF report delivery. Automated sends run from the backend scheduler and are guarded by a lock to avoid duplicate sends with multiple workers.
 
 ---
 

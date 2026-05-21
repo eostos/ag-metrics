@@ -1,4 +1,4 @@
-# Security Notes — AUDITEC AVC/SAT
+# Security Notes — AG-metrics AVC/SAT
 
 ## Credential Storage (Confirmed Issues)
 
@@ -55,7 +55,7 @@ def _check(pw: str, hashed: str) -> bool:
 ## Network Security
 
 - **No TLS/HTTPS** in the application. The server listens on plain HTTP on port 8080.
-- **Recommendation:** Always place a TLS-terminating reverse proxy (nginx, Caddy) in front of AUDITEC in production.
+- **Recommendation:** Always place a TLS-terminating reverse proxy (nginx, Caddy) in front of AG-metrics in production.
 - The API is bound to `0.0.0.0` — accessible on all network interfaces. In `run.sh`, consider binding to `127.0.0.1` if behind a reverse proxy: `uvicorn api:app --host 127.0.0.1 --port 8080`.
 
 ---

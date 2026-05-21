@@ -1,8 +1,8 @@
-# Integration Guide — AUDITEC AVC/SAT
+# Integration Guide — AG-metrics AVC/SAT
 
 ## Overview
 
-AUDITEC integrates with two external systems:
+AG-metrics integrates with two external systems:
 1. **Alice Guardian** (AVC source) — via PostgreSQL database or REST API
 2. **SAT System** — via SFTP file delivery
 
@@ -63,7 +63,7 @@ ORDER BY event_timestamp DESC, a.id DESC
 
 ### Image Proxy
 
-Vehicle images are stored on the SSH server's filesystem. AUDITEC proxies them via:
+Vehicle images are stored on the SSH server's filesystem. AG-metrics proxies them via:
 - `GET /api/image?ref=<path>` — reads from SSH server using SFTP
 - Path resolution: `media_root + image_ref` (see `resolve_remote_media_path()` in `engine.py:339`)
 
@@ -156,7 +156,7 @@ The SAT system deposits JSON batch files to a directory accessible via SFTP.
 
 ### Column Auto-Detection
 
-AUDITEC does not require exact column names. `_auto_cols_sat()` in `api.py:396` auto-detects columns using regex patterns:
+AG-metrics does not require exact column names. `_auto_cols_sat()` in `api.py:396` auto-detects columns using regex patterns:
 
 | Internal Name | Regex Pattern |
 |--------------|--------------|

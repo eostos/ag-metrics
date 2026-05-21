@@ -1,8 +1,8 @@
-# Architecture — AUDITEC AVC/SAT
+# Architecture — AG-metrics AVC/SAT
 
 ## System Overview
 
-AUDITEC is a single-process web application. One Uvicorn process (or 2 in production) runs the FastAPI app defined in `api.py`. The same process serves both the REST API and the React frontend as static files. There is an optional separate polling process (`sat_watcher.py`) for SAT file ingestion.
+AG-metrics is a single-process web application. One Uvicorn process (or 2 in production) runs the FastAPI app defined in `api.py`. The same process serves both the REST API and the React frontend as static files. There is an optional separate polling process (`sat_watcher.py`) for SAT file ingestion.
 
 ---
 

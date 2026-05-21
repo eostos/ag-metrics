@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AG-Metrics — Plataforma de Auditoría AVC/SAT</title>
+  <title>AG-metrics — Plataforma de Auditoría AVC/SAT</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -54,9 +54,11 @@
       headers: () => ({ "Content-Type": "application/json", "Authorization": `Bearer ${window.API.token()}` }),
       _handle: (r) => {
         if (r.ok) return r.json();
-        // Adjuntar status al error para que el catch pueda distinguir 401/500
-        const err = Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
-        return Promise.reject(err);
+        // Lee el cuerpo para extraer el mensaje de FastAPI ({"detail": "..."})
+        return r.json().catch(()=>({})).then(body => {
+          const msg = (body && body.detail) ? body.detail : `HTTP ${r.status}`;
+          return Promise.reject(Object.assign(new Error(msg), { status: r.status }));
+        });
       },
       get:  (url)       => fetch(url, { headers: window.API.headers() }).then(window.API._handle),
       post: (url, body) => fetch(url, { method:"POST", headers: window.API.headers(), body: JSON.stringify(body) }).then(window.API._handle),

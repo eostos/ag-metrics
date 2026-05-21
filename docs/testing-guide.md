@@ -1,4 +1,4 @@
-# Testing Guide — AUDITEC AVC/SAT
+# Testing Guide — AG-metrics AVC/SAT
 
 ## Automated Tests
 

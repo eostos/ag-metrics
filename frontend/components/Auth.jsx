@@ -47,7 +47,7 @@ function LoginScreen({ onLogin }) {
 
         {/* Platform name + tagline */}
         <div style={authStyles.logoWrap}>
-          <div style={authStyles.logoTitle}>AG-Metrics</div>
+          <div style={authStyles.logoTitle}>AG-metrics</div>
           <div style={authStyles.logoSub}>Plataforma de Auditoría AVC / SAT</div>
         </div>
 
