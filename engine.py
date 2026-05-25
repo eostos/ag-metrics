@@ -647,6 +647,22 @@ def reconcile(
         except Exception:
             return ""
 
+    def sat_extra_fields(j):
+        return {
+            "sat_day_id": safe(sat_f, "day_id", j),
+            "sat_id_gare": safe(sat_f, "id_gare", j),
+            "sat_id_voie": safe(sat_f, "id_voie", j),
+            "sat_id_mode_voie": safe(sat_f, "id_mode_voie", j),
+            "sat_numero_poste": safe(sat_f, "numero_poste", j),
+            "sat_matricule": safe(sat_f, "matricule", j),
+            "sat_id_obs_mp": safe(sat_f, "id_obs_mp", j),
+            "sat_id_obs_sequence": safe(sat_f, "id_obs_sequence", j),
+            "sat_id_obs_passage": safe(sat_f, "id_obs_passage", j),
+            "sat_id_paiement": safe(sat_f, "id_paiement", j),
+            "sat_mode_reglement": safe(sat_f, "mode_reglement", j),
+            "sat_fh_carga": safe(sat_f, "fh_carga", j),
+        }
+
     for i in range(n_avc):
         if progress_callback and i % 50 == 0:
             progress_callback(i / n_avc)
@@ -715,6 +731,7 @@ def reconcile(
                     "sat_date": str(safe(sat_f, col_sat_date, j)),
                     "sat_numero": safe(sat_f, col_sat_num, j),
                     "sat_prix": safe(sat_f, col_sat_prix, j),
+                    **sat_extra_fields(j),
                     "id_classe": sc_val,
                     "tab_id_classe": tc_val,
                     "sat_id_classe_desc": sat_desc(sc),
@@ -759,6 +776,12 @@ def reconcile(
                     **{
                         key: "" for key in [
                             "sat_voie", "sat_date", "sat_numero", "sat_prix",
+                            "sat_day_id", "sat_id_gare", "sat_id_voie",
+                            "sat_id_mode_voie", "sat_numero_poste",
+                            "sat_matricule", "sat_id_obs_mp",
+                            "sat_id_obs_sequence", "sat_id_obs_passage",
+                            "sat_id_paiement", "sat_mode_reglement",
+                            "sat_fh_carga",
                             "id_classe", "tab_id_classe",
                             "sat_id_classe_desc", "sat_id_classe_ejes",
                             "sat_tab_id_classe_desc", "sat_tab_id_classe_ejes",
@@ -797,6 +820,7 @@ def reconcile(
                 "sat_date": str(safe(sat_f, col_sat_date, j)),
                 "sat_numero": safe(sat_f, col_sat_num, j),
                 "sat_prix": safe(sat_f, col_sat_prix, j),
+                **sat_extra_fields(j),
                 "id_classe": sc_val,
                 "tab_id_classe": tc_val,
                 "sat_id_classe_desc": sat_desc(sc),

@@ -45,6 +45,21 @@ const LANE_TABS = [
   {id:"axle_error",label:"Error Ejes"},
 ];
 
+const SAT_EXTRA_FIELDS = [
+  ["day_id", "sat_day_id"],
+  ["id_gare", "sat_id_gare"],
+  ["id_voie", "sat_id_voie"],
+  ["id_mode_voie", "sat_id_mode_voie"],
+  ["numero_poste", "sat_numero_poste"],
+  ["matricule", "sat_matricule"],
+  ["id_obs_mp", "sat_id_obs_mp"],
+  ["id_obs_sequence", "sat_id_obs_sequence"],
+  ["id_obs_passage", "sat_id_obs_passage"],
+  ["id_paiement", "sat_id_paiement"],
+  ["mode_reglement", "sat_mode_reglement"],
+  ["fh_carga", "sat_fh_carga"],
+];
+
 function VehicleImage({ imageRef, avcId }) {
   const [src, setSrc] = React.useState(null);
   const [err, setErr] = React.useState(false);
@@ -155,6 +170,7 @@ function EvidencePanel({ event }) {
             ["Clase SAT",      event.sat_id_classe_desc||event.satClass||"—"],
             ["Ejes SAT",       event.sat_id_classe_ejes||event.axlesSat||"—"],
             ["Monto",          event.sat_prix||event.amount||"—"],
+            ...SAT_EXTRA_FIELDS.map(([label, key]) => [label, event[key] || "—"]),
           ].map(([k,v])=>(
             <div key={k} style={evStyles.row}>
               <span style={evStyles.key}>{k}</span>
@@ -345,6 +361,9 @@ function EventModal({ event, onClose }) {
               <Field label="Clase SAT tab"  value={event.sat_tab_id_classe_desc} />
               <Field label="Ejes SAT tab"   value={event.sat_tab_id_classe_ejes} />
               <Field label="Monto"          value={event.sat_prix || event.amount} highlight="#22c97b" />
+              {SAT_EXTRA_FIELDS.map(([label, key]) => (
+                <Field key={key} label={label} value={event[key]} />
+              ))}
             </div>
 
             <div style={{...mStyles.secTitle, marginTop:14}}>Diagnóstico de conciliación</div>
