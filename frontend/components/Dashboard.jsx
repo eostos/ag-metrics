@@ -575,13 +575,13 @@ function Dashboard({ onOpenLane, user }) {
       </div>
 
       <SummaryChart lanes={configs} stats={stats}/>
-      <ClassBreakdown date={date}/>
+      <ClassBreakdown date={date} onOpenLane={onOpenLane}/>
     </div>
   );
 }
 
 // ─── Comparativa de clases AVC vs SAT ───
-function ClassBreakdown({ date }) {
+function ClassBreakdown({ date, onOpenLane }) {
   const [data, setData] = React.useState(null);
 
   React.useEffect(()=>{
@@ -642,6 +642,36 @@ function ClassBreakdown({ date }) {
               transition:"width 0.4s ease"}}/>
           </div>
         </div>
+        {b.lanes && b.lanes.length > 0 && (
+          <div style={{marginTop:10,paddingTop:8,borderTop:"1px solid #162036"}}>
+            <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.6,textTransform:"uppercase",marginBottom:6}}>
+              Diferencias por carril
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {b.lanes.slice(0, 4).map(l => {
+                const laneDeltaColor = l.delta > 0 ? "#ff7e3f" : "#5b9cf6";
+                return (
+                  <button key={l.lane} onClick={() => onOpenLane && onOpenLane(l.lane, {
+                      type: "class_diff",
+                      class_id: b.class_id,
+                      class_name: b.name,
+                    })}
+                    style={{
+                      background:`${laneDeltaColor}14`,border:`1px solid ${laneDeltaColor}40`,
+                      color:laneDeltaColor,borderRadius:5,padding:"4px 7px",fontSize:10,
+                      fontWeight:700,cursor:"pointer",fontFamily:"inherit",lineHeight:1.2,
+                    }}
+                    title={`Abrir ${l.lane} para revisar diferencias de ${b.name}`}>
+                    {l.lane} {l.delta > 0 ? `+${l.delta}` : l.delta}
+                  </button>
+                );
+              })}
+              {b.lanes.length > 4 && (
+                <span style={{fontSize:10,color:"#5b6a8a",alignSelf:"center"}}>+{b.lanes.length - 4} más</span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     );
   }

@@ -1662,10 +1662,11 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
 
     avc_counts: Dict[int, int] = {}
     sat_counts: Dict[int, int] = {}
+    lane_counts: Dict[int, Dict[str, Dict[str, int]]] = {}
 
     with _db() as c:
         rows = c.execute(
-            "SELECT result_json FROM recon_cache WHERE cache_key LIKE ?",
+            "SELECT cache_key,result_json FROM recon_cache WHERE cache_key LIKE ? AND source_id=0",
             (f"%::{fecha}",)
         ).fetchall()
 
@@ -1674,14 +1675,18 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
             events = json.loads(row["result_json"])
         except Exception:
             continue
+        parts = row["cache_key"].split("::", 2)
+        lane = parts[1] if len(parts) > 1 else ""
         for ev in events:
             tipo = ev.get("tipo", "")
+            avc_cls = 0
+            sat_cls = 0
             # Clase AVC — de filas MATCH y AVC
             if tipo in ("MATCH", "AVC"):
                 try:
-                    cls = int(float(ev.get("clase_avc_mapeada") or 0))
-                    if cls > 0:
-                        avc_counts[cls] = avc_counts.get(cls, 0) + 1
+                    avc_cls = int(float(ev.get("clase_avc_mapeada") or 0))
+                    if avc_cls > 0:
+                        avc_counts[avc_cls] = avc_counts.get(avc_cls, 0) + 1
                 except Exception:
                     pass
             # Clase SAT — de filas MATCH y SAT
@@ -1689,11 +1694,17 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
                 try:
                     sc = int(float(ev.get("id_classe")     or 0))
                     tc = int(float(ev.get("tab_id_classe") or 0))
-                    eff = tc if sc == 0 else sc
-                    if eff > 0:
-                        sat_counts[eff] = sat_counts.get(eff, 0) + 1
+                    sat_cls = tc if sc == 0 else sc
+                    if sat_cls > 0:
+                        sat_counts[sat_cls] = sat_counts.get(sat_cls, 0) + 1
                 except Exception:
                     pass
+
+            for cls, side in ((avc_cls, "avc"), (sat_cls, "sat")):
+                if cls <= 0 or not lane:
+                    continue
+                lane_bucket = lane_counts.setdefault(cls, {}).setdefault(lane, {"avc": 0, "sat": 0})
+                lane_bucket[side] += 1
 
     all_cls = sorted(set(list(avc_counts.keys()) + list(sat_counts.keys())))
     breakdown = [
@@ -1702,6 +1713,20 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
             "name":     CLASS_NAMES.get(cls, f"Cls {cls}"),
             "avc":      avc_counts.get(cls, 0),
             "sat":      sat_counts.get(cls, 0),
+            "lanes":    [
+                {
+                    "lane": lane,
+                    "avc": counts.get("avc", 0),
+                    "sat": counts.get("sat", 0),
+                    "delta": counts.get("avc", 0) - counts.get("sat", 0),
+                }
+                for lane, counts in sorted(
+                    lane_counts.get(cls, {}).items(),
+                    key=lambda item: abs(item[1].get("avc", 0) - item[1].get("sat", 0)),
+                    reverse=True,
+                )
+                if counts.get("avc", 0) != counts.get("sat", 0)
+            ],
         }
         for cls in all_cls if cls > 0
     ]

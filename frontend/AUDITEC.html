@@ -283,6 +283,7 @@
       const [user, setUser]         = React.useState(null);
       const [view, setView]         = React.useState("dashboard");
       const [activeLane, setActiveLane] = React.useState(null);
+      const [activeLaneFilter, setActiveLaneFilter] = React.useState(null);
       const [uiLanguage, setUiLanguage] = React.useState(window.getUILanguage());
 
       React.useEffect(() => {
@@ -318,11 +319,11 @@
         window.API.post("/api/auth/logout", {}).catch(() => {});
         localStorage.removeItem("auditec_token");
         localStorage.removeItem("auditec_user");
-        setUser(null); setActiveLane(null); setView("dashboard");
+        setUser(null); setActiveLane(null); setActiveLaneFilter(null); setView("dashboard");
       }
 
-      function handleNavigate(v) { setView(v); setActiveLane(null); }
-      function handleOpenLane(id) { setActiveLane(id); }
+      function handleNavigate(v) { setView(v); setActiveLane(null); setActiveLaneFilter(null); }
+      function handleOpenLane(id, filter) { setActiveLane(id); setActiveLaneFilter(filter || null); }
 
       if (!user) return <LoginScreen onLogin={handleLogin}/>;
 
@@ -337,7 +338,7 @@
         <AppLayout user={user} onLogout={handleLogout} currentView={view}
           onNavigate={handleNavigate} title={window.t(pageInfo.title)} subtitle={window.t(pageInfo.subtitle)}>
           {view==="dashboard" && !activeLane && <Dashboard onOpenLane={handleOpenLane} user={user}/>}
-          {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} onBack={()=>setActiveLane(null)}/>}
+          {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} initialFilter={activeLaneFilter} onBack={()=>{setActiveLane(null);setActiveLaneFilter(null);}}/>}
           {viewRoot==="reports" && <ReportsModule section={viewSection || "list"}/>}
           {viewRoot==="alarms" && user.role==="Admin" && <AlarmsModule section={viewSection || "active"}/>}
           {viewRoot==="notifications" && user.role==="Admin" && <NotificationsModule section={viewSection || "history"}/>}

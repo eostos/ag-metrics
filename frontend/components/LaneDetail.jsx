@@ -441,7 +441,7 @@ const mStyles = {
   fieldVal: { fontSize:11, color:"#e8edf5", fontWeight:500, textAlign:"right", wordBreak:"break-all" },
 };
 
-function LaneDetail({ laneId, onBack }) {
+function LaneDetail({ laneId, onBack, initialFilter }) {
   const lane = (window.LANE_CONFIGS||[]).find(l=>l.id===laneId)||{name:laneId};
   const today = (() => { try { return new Date().toLocaleDateString("en-CA",{timeZone:"America/Mexico_City"}); } catch(e){ return new Date().toISOString().slice(0,10); } })();
 
@@ -464,6 +464,7 @@ function LaneDetail({ laneId, onBack }) {
   const [recoSource,   setRecoSource]  = React.useState("");
   const [laneMapping,  setLaneMapping] = React.useState({});
   const [mappingReady, setMappingReady]= React.useState(false); // true cuando config ha cargado
+  const classFilter = initialFilter && initialFilter.type === "class_diff" ? initialFilter : null;
 
   // Resetear conciliación al cambiar carril o fecha
   const didAutoReconRef = React.useRef(false);
@@ -554,12 +555,24 @@ function LaneDetail({ laneId, onBack }) {
 
   const filtered = React.useMemo(() => {
     let evts = activeTab==="all" ? allEvents : allEvents.filter(e=>(e.tipo||e.status)===activeTab);
+    if (classFilter) {
+      const clsTarget = Number(classFilter.class_id);
+      evts = evts.filter(e => {
+        const avcCls = Number(e.clase_avc_mapeada || 0);
+        const satId  = Number(e.id_classe || 0);
+        const satTab = Number(e.tab_id_classe || 0);
+        const satCls = satId === 0 ? satTab : satId;
+        const involvesClass = avcCls === clsTarget || satCls === clsTarget;
+        const differs = (e.tipo === "AVC" || e.tipo === "SAT" || (avcCls > 0 && satCls > 0 && avcCls !== satCls));
+        return involvesClass && differs;
+      });
+    }
     if (search) evts=evts.filter(e=>JSON.stringify(e).toLowerCase().includes(search.toLowerCase()));
     return [...evts].sort((a,b)=>{
       const av=a[sortCol]||"", bv=b[sortCol]||"";
       return typeof av==="number"?(av-bv)*sortDir:String(av).localeCompare(String(bv))*sortDir;
     });
-  },[allEvents,activeTab,sortCol,sortDir,search]);
+  },[allEvents,activeTab,sortCol,sortDir,search,initialFilter]);
 
   React.useEffect(() => { setPage(0); }, [activeTab, search, sortCol, sortDir]);
 
@@ -710,6 +723,12 @@ function LaneDetail({ laneId, onBack }) {
         <div style={{flex:1}}/>
         <input placeholder="Buscar…" value={search} onChange={e=>setSearch(e.target.value)} style={ldStyles.searchInput}/>
       </div>
+      {classFilter && (
+        <div style={ldStyles.filterBanner}>
+          <span>Revisión por clase: {classFilter.class_name || `Clase ${classFilter.class_id}`}</span>
+          <span style={{color:"#5b6a8a"}}>solo eventos con diferencia AVC/SAT</span>
+        </div>
+      )}
 
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
         <div style={{flex:"0 0 60%",overflowY:"auto",overflowX:"auto"}}>
@@ -834,6 +853,7 @@ const ldStyles = {
   searchInput: {background:"#080d1a",border:"1px solid #2a3045",borderRadius:6,padding:"5px 10px",color:"#e8edf5",fontSize:11,fontFamily:"inherit",outline:"none",width:180,marginBottom:2},
   camBtn:  {background:"none",border:"none",cursor:"pointer",fontSize:14,padding:"2px 4px"},
   infoBtn: {background:"none",border:"none",cursor:"pointer",color:"#4d7fe0",padding:"2px 4px",verticalAlign:"middle",lineHeight:1},
+  filterBanner: {display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:"rgba(77,127,224,0.08)",border:"1px solid rgba(77,127,224,0.24)",borderRadius:7,padding:"8px 11px",marginBottom:12,fontSize:12,color:"#e8edf5"},
   pagBar: {display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 10px",borderTop:"1px solid #1e2535",background:"#070c18",position:"sticky",bottom:0},
   pagBtn: {background:"#162036",border:"1px solid #2a3045",borderRadius:5,padding:"4px 8px",color:"#8a9ab5",fontSize:12,cursor:"pointer",fontFamily:"inherit",minWidth:28,transition:"opacity 0.15s"},
 };
