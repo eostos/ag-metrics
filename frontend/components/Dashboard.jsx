@@ -595,6 +595,10 @@ function ClassBreakdown({ date, onOpenLane }) {
 
   const bd = data.breakdown;
   const maxVal = Math.max(...bd.flatMap(b=>[b.avc, b.sat]), 1);
+  const money = data.money || {avc_amount:0, sat_amount:0, amount_delta:0, currency:"MXN"};
+  const moneyFmt = (value) => Number(value || 0).toLocaleString("es-MX", {
+    style:"currency", currency:money.currency || "MXN", maximumFractionDigits:0,
+  });
 
   // Separar motos del resto
   const motos = bd.filter(b => b.class_id === 15);
@@ -606,6 +610,8 @@ function ClassBreakdown({ date, onOpenLane }) {
     const satPct = Math.round((b.sat / maxVal) * 100);
     const isMoto = b.class_id === 15;
     const deltaColor = delta > 0 ? "#ff7e3f" : delta < 0 ? "#5b9cf6" : "#22c97b";
+    const amountDelta = Number(b.amount_delta || 0);
+    const amountColor = amountDelta > 0 ? "#ff7e3f" : amountDelta < 0 ? "#5b9cf6" : "#22c97b";
     return (
       <div style={{
         background: isMoto ? "rgba(91,156,246,0.07)" : "#0f1928",
@@ -639,7 +645,33 @@ function ClassBreakdown({ date, onOpenLane }) {
           </div>
           <div style={{height:5,background:"#162036",borderRadius:3}}>
             <div style={{height:"100%",width:`${satPct}%`,background:"#5b9cf6",borderRadius:3,
-              transition:"width 0.4s ease"}}/>
+            transition:"width 0.4s ease"}}/>
+          </div>
+        </div>
+        <div style={{marginTop:9,paddingTop:8,borderTop:"1px solid #162036",
+          display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div>
+            <div style={{fontSize:9,color:"#5b6a8a",letterSpacing:0.4,textTransform:"uppercase"}}>AVC est.</div>
+            <div style={{fontSize:12,fontWeight:800,color:"#ffb27d",marginTop:2}}>
+              {moneyFmt(b.avc_amount)}
+            </div>
+          </div>
+          <div>
+            <div style={{fontSize:9,color:"#5b6a8a",letterSpacing:0.4,textTransform:"uppercase"}}>SAT real</div>
+            <div style={{fontSize:12,fontWeight:800,color:"#8bbcff",marginTop:2}}>
+              {moneyFmt(b.sat_amount)}
+            </div>
+          </div>
+          <div style={{gridColumn:"1/-1",display:"flex",justifyContent:"space-between",gap:8,
+            alignItems:"center",background:`${amountColor}10`,border:`1px solid ${amountColor}30`,
+            borderRadius:5,padding:"5px 7px"}}>
+            <span style={{fontSize:10,color:"#8a9ab5"}}>Diferencia $</span>
+            <span style={{fontSize:12,fontWeight:800,color:amountColor}}>
+              {amountDelta > 0 ? "+" : ""}{moneyFmt(amountDelta)}
+            </span>
+          </div>
+          <div style={{gridColumn:"1/-1",fontSize:9,color:"#5b6a8a"}}>
+            Tarifa {b.tariff_source || "ref."} · {moneyFmt(b.tariff)}
           </div>
         </div>
         {b.lanes && b.lanes.length > 0 && (
@@ -661,7 +693,7 @@ function ClassBreakdown({ date, onOpenLane }) {
                       color:laneDeltaColor,borderRadius:5,padding:"4px 7px",fontSize:10,
                       fontWeight:700,cursor:"pointer",fontFamily:"inherit",lineHeight:1.2,
                     }}
-                    title={`Abrir ${l.lane} para revisar diferencias de ${b.name}`}>
+                    title={`Abrir ${l.lane} para revisar diferencias de ${b.name}. Impacto ${moneyFmt(l.amount_delta)}`}>
                     {l.lane} {l.delta > 0 ? `+${l.delta}` : l.delta}
                   </button>
                 );
@@ -700,6 +732,29 @@ function ClassBreakdown({ date, onOpenLane }) {
             <span style={{width:10,height:10,borderRadius:2,background:"rgba(255,126,63,0.25)",display:"inline-block"}}/>
             <span style={{color:"#8a9ab5"}}>+AVC · −SAT</span>
           </span>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,marginBottom:16}}>
+        <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
+          <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>SAT registrado</div>
+          <div style={{fontSize:20,fontWeight:800,color:"#8bbcff",marginTop:4}}>{moneyFmt(money.sat_amount)}</div>
+        </div>
+        <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
+          <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>AVC estimado</div>
+          <div style={{fontSize:20,fontWeight:800,color:"#ffb27d",marginTop:4}}>{moneyFmt(money.avc_amount)}</div>
+        </div>
+        <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
+          <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>Diferencia neta</div>
+          <div style={{fontSize:20,fontWeight:800,color:money.amount_delta > 0 ? "#ff7e3f" : money.amount_delta < 0 ? "#5b9cf6" : "#22c97b",marginTop:4}}>
+            {money.amount_delta > 0 ? "+" : ""}{moneyFmt(money.amount_delta)}
+          </div>
+        </div>
+        <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
+          <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>Base de cálculo</div>
+          <div style={{fontSize:11,fontWeight:600,color:"#8a9ab5",lineHeight:1.35,marginTop:5}}>
+            SAT real por cobro · AVC por tarifa configurada
+          </div>
         </div>
       </div>
 

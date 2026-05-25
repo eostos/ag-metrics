@@ -114,6 +114,7 @@ def default_db_form() -> Dict[str, str]:
         "plaza_name": "",
         "timezone": "America/Mexico_City",
         "lane_mapping": "{}",
+        "avc_tariffs": "{}",
     }
 
 
@@ -132,6 +133,7 @@ def settings_keys() -> List[str]:
         "plaza_name",
         "timezone",
         "lane_mapping",
+        "avc_tariffs",
     ]
 
 

@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 
 from engine import (
     SETTINGS_DB_PATH,
+    SAT_DESC,
     detect_col,
     fetch_avc_dataframe,
     fetch_remote_image_bytes,
@@ -556,6 +557,24 @@ def _set_app_setting_json(key: str, value: Any) -> None:
             "INSERT OR REPLACE INTO app_settings(setting_key,setting_value,updated_at) VALUES(?,?,?)",
             (key, json.dumps(value), _now()),
         )
+
+
+def _load_settings_with_source_fallback() -> Dict[str, Any]:
+    cfg = load_saved_settings()
+    if cfg.get("avc_tariffs") and cfg.get("avc_tariffs") != "{}":
+        return cfg
+    try:
+        with _db() as c:
+            row = c.execute(
+                "SELECT config FROM avc_sources WHERE config LIKE '%avc_tariffs%' ORDER BY id LIMIT 1"
+            ).fetchone()
+        if row:
+            source_cfg = json.loads(row["config"] or "{}")
+            if source_cfg.get("avc_tariffs"):
+                cfg["avc_tariffs"] = source_cfg["avc_tariffs"]
+    except Exception:
+        pass
+    return cfg
 
 
 def _processing_status_key(date_str: str) -> str:
@@ -1395,6 +1414,85 @@ def get_all_sat_voies(user=Depends(_get_user)):
     return {"voies": sorted(voies)}
 
 
+@app.get("/api/sat/tariffs")
+def get_sat_tariffs(day: str = "", user=Depends(_get_user)):
+    """Tarifas SAT observadas por clase desde un MERGED o desde todo el historico."""
+    os.makedirs(MERGED_DIR, exist_ok=True)
+    day_str = day.replace("-", "").strip()
+    if day_str:
+        files = [os.path.join(MERGED_DIR, f"SAT-TEXCOCO-{day_str}-MERGED.json")]
+    else:
+        files = sorted(glob.glob(os.path.join(MERGED_DIR, "SAT-TEXCOCO-*-MERGED.json")), reverse=True)
+
+    price_counts: Dict[int, Dict[float, int]] = {}
+    source_days = []
+    source_files = []
+    transaction_count = 0
+
+    for fp in files:
+        if not os.path.exists(fp):
+            continue
+        fname = os.path.basename(fp)
+        m = re.search(r"(\d{8})", fname)
+        source_day = m.group(1) if m else ""
+        try:
+            with open(fp, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        txns = data.get("transactions", [])
+        if not txns and not day_str:
+            continue
+        source_days.append(source_day)
+        source_files.append(fname)
+        transaction_count += len(txns)
+        for tx in txns:
+            try:
+                sc = int(float(tx.get("id_classe") or 0))
+                tc = int(float(tx.get("tab_id_classe") or 0))
+                cls = tc if sc == 0 else sc
+            except Exception:
+                cls = 0
+            if cls <= 0:
+                continue
+            try:
+                price = float(str(tx.get("prix_total") or tx.get("sat_prix") or "").replace(",", "").strip())
+            except Exception:
+                price = 0.0
+            if price <= 0:
+                continue
+            bucket = price_counts.setdefault(cls, {})
+            bucket[price] = bucket.get(price, 0) + 1
+
+    if not source_files:
+        return {"day": day_str, "source_file": "", "tariffs": [], "by_class": {}}
+
+    tariffs = []
+    for cls in sorted(price_counts):
+        prices = price_counts[cls]
+        common_price, common_count = sorted(prices.items(), key=lambda item: (-item[1], item[0]))[0]
+        tariffs.append({
+            "class_id": cls,
+            "name": SAT_DESC.get(cls, f"Cls {cls}"),
+            "tariff": round(common_price, 2),
+            "count": common_count,
+            "total": sum(prices.values()),
+            "distinct_prices": [
+                {"price": round(price, 2), "count": count}
+                for price, count in sorted(prices.items(), key=lambda item: item[0])
+            ],
+        })
+
+    return {
+        "day": day_str or "historico",
+        "source_file": source_files[0] if day_str else f"{len(source_files)} archivos MERGED",
+        "source_days": sorted(set(source_days)),
+        "transactions": transaction_count,
+        "tariffs": tariffs,
+        "by_class": {str(item["class_id"]): item for item in tariffs},
+    }
+
+
 # ─────────────────────────────────────────────────────────
 # Status — endpoint de polling para auto-refresh del Dashboard
 # ─────────────────────────────────────────────────────────
@@ -1659,10 +1757,27 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
         6:"C6", 7:"C7", 8:"C8", 9:"C9+", 10:"AR1",
         11:"AR2", 12:"B2", 13:"B3", 14:"B4", 15:"Moto",
     }
+    cfg = _load_settings_with_source_fallback()
+    raw_avc_tariffs = cfg.get("avc_tariffs") or {}
+    if isinstance(raw_avc_tariffs, str):
+        try:
+            raw_avc_tariffs = json.loads(raw_avc_tariffs)
+        except Exception:
+            raw_avc_tariffs = {}
 
     avc_counts: Dict[int, int] = {}
     sat_counts: Dict[int, int] = {}
-    lane_counts: Dict[int, Dict[str, Dict[str, int]]] = {}
+    sat_amounts: Dict[int, float] = {}
+    sat_price_counts: Dict[int, Dict[float, int]] = {}
+    lane_counts: Dict[int, Dict[str, Dict[str, Any]]] = {}
+
+    def _money_value(value: Any) -> float:
+        try:
+            if value in ("", None):
+                return 0.0
+            return float(str(value).replace(",", "").strip())
+        except Exception:
+            return 0.0
 
     with _db() as c:
         rows = c.execute(
@@ -1697,28 +1812,67 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
                     sat_cls = tc if sc == 0 else sc
                     if sat_cls > 0:
                         sat_counts[sat_cls] = sat_counts.get(sat_cls, 0) + 1
+                        sat_price = _money_value(ev.get("sat_prix"))
+                        sat_amounts[sat_cls] = sat_amounts.get(sat_cls, 0.0) + sat_price
+                        if sat_price > 0:
+                            price_bucket = sat_price_counts.setdefault(sat_cls, {})
+                            price_bucket[sat_price] = price_bucket.get(sat_price, 0) + 1
                 except Exception:
                     pass
 
             for cls, side in ((avc_cls, "avc"), (sat_cls, "sat")):
                 if cls <= 0 or not lane:
                     continue
-                lane_bucket = lane_counts.setdefault(cls, {}).setdefault(lane, {"avc": 0, "sat": 0})
+                lane_bucket = lane_counts.setdefault(cls, {}).setdefault(
+                    lane, {"avc": 0, "sat": 0, "sat_amount": 0.0}
+                )
                 lane_bucket[side] += 1
+                if side == "sat":
+                    lane_bucket["sat_amount"] += _money_value(ev.get("sat_prix"))
 
     all_cls = sorted(set(list(avc_counts.keys()) + list(sat_counts.keys())))
+
+    tariffs: Dict[int, float] = {}
+    for cls, prices in sat_price_counts.items():
+        if prices:
+            tariffs[cls] = sorted(prices.items(), key=lambda item: (-item[1], item[0]))[0][0]
+    configured_tariffs: Dict[int, float] = {}
+    if isinstance(raw_avc_tariffs, dict):
+        for key, value in raw_avc_tariffs.items():
+            try:
+                cls = int(float(key))
+                amount = _money_value(value)
+            except Exception:
+                continue
+            if cls > 0 and amount > 0:
+                configured_tariffs[cls] = amount
+
     breakdown = [
         {
             "class_id": cls,
             "name":     CLASS_NAMES.get(cls, f"Cls {cls}"),
             "avc":      avc_counts.get(cls, 0),
             "sat":      sat_counts.get(cls, 0),
+            "tariff":   round(configured_tariffs.get(cls, tariffs.get(cls, 0.0)), 2),
+            "tariff_source": "AVC configurada" if cls in configured_tariffs else "SAT frecuente",
+            "avc_amount": round(avc_counts.get(cls, 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0)), 2),
+            "sat_amount": round(sat_amounts.get(cls, 0.0), 2),
+            "amount_delta": round(
+                (avc_counts.get(cls, 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0))) - sat_amounts.get(cls, 0.0),
+                2,
+            ),
             "lanes":    [
                 {
                     "lane": lane,
                     "avc": counts.get("avc", 0),
                     "sat": counts.get("sat", 0),
                     "delta": counts.get("avc", 0) - counts.get("sat", 0),
+                    "avc_amount": round(counts.get("avc", 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0)), 2),
+                    "sat_amount": round(counts.get("sat_amount", 0.0), 2),
+                    "amount_delta": round(
+                        (counts.get("avc", 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0))) - counts.get("sat_amount", 0.0),
+                        2,
+                    ),
                 }
                 for lane, counts in sorted(
                     lane_counts.get(cls, {}).items(),
@@ -1730,7 +1884,20 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
         }
         for cls in all_cls if cls > 0
     ]
-    return {"date": fecha, "breakdown": breakdown}
+
+    total_avc_amount = sum(item["avc_amount"] for item in breakdown)
+    total_sat_amount = sum(item["sat_amount"] for item in breakdown)
+    return {
+        "date": fecha,
+        "breakdown": breakdown,
+        "money": {
+            "avc_amount": round(total_avc_amount, 2),
+            "sat_amount": round(total_sat_amount, 2),
+            "amount_delta": round(total_avc_amount - total_sat_amount, 2),
+            "currency": "MXN",
+            "method": "SAT real por sat_prix; AVC estimado con tarifas AVC configuradas. Si falta una clase, usa la tarifa SAT mas frecuente como respaldo.",
+        },
+    }
 
 
 @app.get("/api/reconcile/cache")
@@ -2352,11 +2519,13 @@ def get_image(ref: str, source_id: Optional[int] = None, user=Depends(_get_user)
 
 @app.get("/api/config")
 def get_config(user=Depends(_require_admin)):
-    return load_saved_settings()
+    return _load_settings_with_source_fallback()
 
 @app.post("/api/config")
 async def post_config(request: Request, user=Depends(_require_admin)):
     body = await request.json()
+    if isinstance(body.get("avc_tariffs"), (dict, list)):
+        body["avc_tariffs"] = json.dumps(body["avc_tariffs"])
     save_settings(body)
     # Sincronizar también la primera fuente de tipo database
     with _db() as c:

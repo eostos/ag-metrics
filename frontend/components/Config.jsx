@@ -258,15 +258,34 @@ function AVCSourcesConfig() {
 
 function SATConfig() {
   const UPLOAD_DIR = "/home/sftpuser/uploads";
+  const CLASS_OPTIONS = [
+    [1,"A - Auto 2 Ejes"], [2,"C2"], [3,"C3"], [4,"C4"], [5,"C5"],
+    [6,"C6"], [7,"C7"], [8,"C8"], [9,"C9+"], [10,"AR1"],
+    [11,"AR2"], [12,"B2"], [13,"B3"], [14,"B4"], [15,"Moto"],
+  ];
   const [dirInfo,  setDirInfo]  = React.useState(null);
   const [merging,  setMerging]  = React.useState({});
   const [mergeMsg, setMergeMsg] = React.useState({});
+  const [tariffs,  setTariffs]  = React.useState({});
+  const [satTariffs, setSatTariffs] = React.useState({by_class:{}});
+  const [savingTariffs, setSavingTariffs] = React.useState(false);
+  const [tariffMsg, setTariffMsg] = React.useState("");
 
   function loadDir() {
     window.API.get("/api/sat/directory").then(d=>setDirInfo(d)).catch(()=>{});
   }
+  function loadSatTariffs() {
+    window.API.get("/api/sat/tariffs").then(d=>setSatTariffs(d || {by_class:{}})).catch(()=>{});
+  }
   React.useEffect(()=>{ loadDir(); }, []);
+  React.useEffect(()=>{ loadSatTariffs(); }, []);
   React.useEffect(()=>{ const t=setInterval(loadDir,30000); return ()=>clearInterval(t); }, []);
+  React.useEffect(()=>{
+    window.API.get("/api/config").then(cfg=>{
+      const raw = cfg.avc_tariffs || {};
+      setTariffs(typeof raw === "string" ? JSON.parse(raw || "{}") : raw);
+    }).catch(()=>{});
+  }, []);
 
   function timeAgo(secs) {
     if (secs==null) return "—";
@@ -290,12 +309,129 @@ function SATConfig() {
       .finally(()=>setMerging(p=>({...p,[day]:false})));
   }
 
+  function setTariff(classId, value) {
+    setTariffs(p=>({...p, [classId]: value}));
+  }
+
+  function copySatTariff(classId) {
+    const sat = satTariffs?.by_class?.[classId]?.tariff;
+    if (sat == null) return;
+    setTariff(classId, sat);
+  }
+
+  function copyAllSatTariffs() {
+    const next = {...tariffs};
+    CLASS_OPTIONS.forEach(([id])=>{
+      const sat = satTariffs?.by_class?.[id]?.tariff;
+      if (sat != null) next[id] = sat;
+    });
+    setTariffs(next);
+  }
+
+  function saveTariffs() {
+    setSavingTariffs(true); setTariffMsg("");
+    const clean = {};
+    CLASS_OPTIONS.forEach(([id])=>{
+      const raw = String(tariffs[id] ?? "").replace(",", ".").trim();
+      if (raw !== "" && !Number.isNaN(Number(raw))) clean[id] = Number(raw);
+    });
+    window.API.get("/api/config")
+      .then(cfg=>window.API.post("/api/config",{...cfg, avc_tariffs: clean}))
+      .then(()=>{
+        setTariffs(clean);
+        setTariffMsg("✓ Tarifas guardadas");
+        setTimeout(()=>setTariffMsg(""),3000);
+      })
+      .catch(e=>setTariffMsg(`Error: ${e.message || e}`))
+      .finally(()=>setSavingTariffs(false));
+  }
+
   const totalPending = dirInfo?.total_pending || 0;
   const secsSince    = dirInfo?.seconds_since_last;
   const days         = dirInfo?.days || [];
+  const moneyFmt = (value) => Number(value || 0).toLocaleString("es-MX", {
+    style:"currency", currency:"MXN", maximumFractionDigits:2,
+  });
 
   return (
     <div>
+      <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap",marginBottom:12}}>
+          <div>
+            <div style={{fontSize:13,fontWeight:600,color:"#e8edf5",marginBottom:5}}>Tarifas AVC para Impacto Económico</div>
+            <div style={{fontSize:12,color:"#5b6a8a",lineHeight:1.45}}>
+              Estas tarifas estiman el monto AVC por clase en el Dashboard. SAT conserva su monto real desde sat_prix.
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <button onClick={copyAllSatTariffs} style={cfgStyles.actionBtn}>
+              Copiar SAT a AVC
+            </button>
+            {tariffMsg && (
+              <span style={{fontSize:11,color:tariffMsg.startsWith("✓")?"#22c97b":"#ff4c6a"}}>{tariffMsg}</span>
+            )}
+            <button onClick={saveTariffs} disabled={savingTariffs}
+              style={{...cfgStyles.saveBtn,opacity:savingTariffs?0.7:1}}>
+              {savingTariffs ? "Guardando…" : "Guardar tarifas"}
+            </button>
+          </div>
+        </div>
+        <div style={{fontSize:11,color:"#5b6a8a",marginBottom:12}}>
+          SAT observado desde <span style={{color:"#8a9ab5",fontFamily:"monospace"}}>{satTariffs.source_file || "sin MERGED"}</span>
+          {satTariffs.day ? ` · ${satTariffs.day}` : ""}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:10}}>
+          {CLASS_OPTIONS.map(([id, label])=>{
+            const sat = satTariffs?.by_class?.[id];
+            const avcVal = Number(tariffs[id] || 0);
+            const satVal = Number(sat?.tariff || 0);
+            const same = avcVal > 0 && satVal > 0 && Math.abs(avcVal - satVal) < 0.01;
+            const different = avcVal > 0 && satVal > 0 && !same;
+            return (
+            <div key={id} style={{background:"#0d1525",border:"1px solid #1c2b46",borderRadius:8,padding:10}}>
+              <label style={cfgStyles.label}>Clase {id} · {label}</label>
+              <input type="number" min="0" step="0.01"
+                value={tariffs[id] ?? ""}
+                onChange={e=>setTariff(id, e.target.value)}
+                placeholder="0.00"
+                style={{...cfgStyles.input,padding:"8px 10px"}}/>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,alignItems:"start",marginTop:8}}>
+                <div>
+                  <div style={{fontSize:10,color:"#5b6a8a"}}>AVC configurada</div>
+                  <div style={{fontSize:13,fontWeight:800,color:avcVal?"#ffb27d":"#5b6a8a"}}>
+                    {avcVal ? moneyFmt(avcVal) : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div style={{fontSize:10,color:"#5b6a8a"}}>SAT automática</div>
+                  <div style={{fontSize:13,fontWeight:800,color:satVal?"#8bbcff":"#5b6a8a"}}>
+                    {satVal ? moneyFmt(satVal) : "—"}
+                  </div>
+                  {sat && (
+                    <div style={{fontSize:9,color:"#5b6a8a",marginTop:1}}>
+                      {sat.count?.toLocaleString()} de {sat.total?.toLocaleString()} txns
+                    </div>
+                  )}
+                </div>
+                <div style={{gridColumn:"1/-1",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:10,fontWeight:800,borderRadius:4,padding:"2px 6px",
+                    color:same?"#22c97b":different?"#ff7e3f":"#5b6a8a",
+                    background:same?"rgba(34,201,123,0.12)":different?"rgba(255,126,63,0.12)":"#080d1a",
+                    border:`1px solid ${same?"rgba(34,201,123,0.35)":different?"rgba(255,126,63,0.35)":"#1c2b46"}`}}>
+                    {same ? "Igual" : different ? "Diferente" : "Sin comparar"}
+                  </span>
+                  {satVal > 0 && (
+                    <button onClick={()=>copySatTariff(id)} style={{...cfgStyles.actionBtn,fontSize:10,padding:"4px 7px"}}>
+                      Usar SAT
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );})}
+        </div>
+      </div>
+
       {/* Encabezado del directorio */}
       <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:16}}>

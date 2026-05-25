@@ -144,6 +144,19 @@ Reports Phase 1 is UI/configuration-first:
 - `Send Test Report` in Create Report posts to `POST /api/report-email/send-preview`, which reuses the existing SMTP service but sends the designed report for the current builder selection instead of the older plain SMTP test PDF.
 - Send now / test report paths reuse the existing report email route and PDF generation flow.
 
+### Dashboard Economic Impact
+
+- The Dashboard class comparison (`/api/class-summary`) now includes monetary impact by class and global totals.
+- SAT money is authoritative and comes from the actual `sat_prix` values in reconciled SAT rows.
+- AVC money is an estimate: AVC count by mapped class multiplied by configured AVC tariffs from `/api/config` key `avc_tariffs`.
+- If a configured AVC tariff is missing for a class, `/api/class-summary` falls back to the most frequent SAT tariff for that class in the selected date cache and marks the class tariff source as `SAT frecuente`.
+- `Settings -> System Configuration -> Integración SAT` contains the editable AVC tariff table and shows side-by-side:
+  - `AVC configurada`
+  - `SAT automática`
+  - match status: Igual / Diferente / Sin comparar
+- `GET /api/sat/tariffs` extracts observed SAT tariffs by class. With no `day` parameter it scans all historical merged files in `~/sat_merged/`, which is necessary for rare classes such as C7/C8 that may not appear on the current date. With `day=YYYYMMDD` or `YYYY-MM-DD` it uses that specific merged file.
+- The UI has buttons to copy one SAT tariff into one AVC class (`Usar SAT`) or copy all observed SAT tariffs into AVC (`Copiar SAT a AVC`), but the operator must save the tariffs.
+
 ### Alarms Module
 
 Alarms Phase 1 is basic configuration/history only:
@@ -184,6 +197,7 @@ Alarms Phase 1 is basic configuration/history only:
 - The `tipo` field on each result row is the primary audit status field.
 - **Class mapping** is AVC-to-SAT: AVC uses `vehicle_type` strings + `axle_count` → mapped to a numeric SAT class (1–15, or 0 for invalid/unknown); SAT uses `id_classe` and `tab_id_classe`.
 - **Class compatibility is exact**: `is_class_compatible()` returns true only if the AVC mapped class equals `id_classe` or `tab_id_classe`. Do not describe category matching unless the code changes.
+- **Economic impact is not reconciliation logic**: it is reporting/management presentation. Do not change `engine.reconcile()` to calculate money; keep monetary estimates in `api.py`/Dashboard using `sat_prix` and `avc_tariffs`.
 - **`matchRate` is a detection-rate metric**, calculated as `(total - satOnly) / total * 100`; it is not the percentage of perfect MATCH rows.
 - **Lane identity** is a string (device name from AVC). SAT uses a "voie" number. The lane mapping config links AVC lane names to SAT voie identifiers.
 - **Source identity matters**: AVC events are stored per `source_id`, and reconciliation cache keys include `source_id`. When debugging stale or missing results, check whether the frontend/API request passed the expected `source_id`.
