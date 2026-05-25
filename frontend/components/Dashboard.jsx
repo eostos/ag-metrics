@@ -113,6 +113,15 @@ function SummaryChart({ lanes, stats }) {
 }
 
 // ─── Indicador en vivo (AVC | SAT | pendientes) ───
+function shortDateTime(value) {
+  if (!value) return "—";
+  try {
+    return new Date(value).toLocaleString([], {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit"});
+  } catch(e) {
+    return String(value).slice(5, 16).replace("T", " ");
+  }
+}
+
 function LiveBar({ status, lastRefresh, bgSyncing }) {
   if (!status) return null;
   const avcEvts  = Number(status.avc_events)  || 0;
@@ -123,9 +132,11 @@ function LiveBar({ status, lastRefresh, bgSyncing }) {
       padding:"5px 10px",background:"#070c18",borderRadius:6,border:"1px solid #1e2535",fontSize:11}}>
       <span style={{color:"#5b6a8a"}}>AVC</span>
       <span style={{fontWeight:700,color:"#4d7fe0",fontFamily:"monospace"}}>{avcEvts.toLocaleString()}</span>
+      <span title="Última actualización AVC" style={{color:"#5b6a8a"}}>act. {shortDateTime(status.avc_updated_at)}</span>
       <span style={{color:"#162036"}}>|</span>
       <span style={{color:"#5b6a8a"}}>SAT</span>
       <span style={{fontWeight:700,color:"#5b9cf6",fontFamily:"monospace"}}>{satMerged.toLocaleString()}</span>
+      <span title="Última actualización SAT" style={{color:"#5b6a8a"}}>act. {shortDateTime(status.sat_updated_at)}</span>
       {satPend>0 && (
         <span style={{background:"rgba(245,212,51,0.15)",color:"#f5d433",
           padding:"1px 6px",borderRadius:4,fontWeight:600}}>
@@ -153,6 +164,26 @@ function BusyPill({ label, detail }) {
       <span>{label}</span>
       {detail && <span style={{color:"#5b6a8a"}}>{detail}</span>}
     </span>
+  );
+}
+
+function ProcessingRibbon({ activity }) {
+  if (!activity || !activity.label) return null;
+  return (
+    <div style={dashStyles.processingRibbon}>
+      <div style={dashStyles.processingGlow}/>
+      <div style={dashStyles.processingContent}>
+        <div style={dashStyles.processingPulse}>
+          {[0, 0.18, 0.36].map(delay => (
+            <span key={delay} style={{...dashStyles.processingDot, animationDelay:`${delay}s`}}/>
+          ))}
+        </div>
+        <div>
+          <div style={dashStyles.processingTitle}>{activity.label}</div>
+          {activity.detail && <div style={dashStyles.processingDetail}>{activity.detail}</div>}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -218,12 +249,6 @@ function Dashboard({ onOpenLane, user }) {
         if (data && data.lanes && data.lanes.length > 0) {
           setConfigs(data.lanes);
           setStats(data.stats||{});
-          // Si algún carril no tiene stats reconciliadas → conciliar en fondo
-          // bgReconcileAll tiene su propio guard para evitar duplicados.
-          const needsRecon = data.lanes.some(l=>(data.stats[l.id]?.matchRate||0)===0);
-          if (needsRecon && !bgReconDoneRef.current) {
-            bgReconcileAll(data.lanes, d);
-          }
         }
         return data;
       })
@@ -337,6 +362,17 @@ function Dashboard({ onOpenLane, user }) {
           }
 
           const avcCount = s.avc_events || 0;
+          const processing = s.processing || {};
+          if (processing.state && !["ready", "error"].includes(processing.state)) {
+            const labels = {
+              merging_sat: "Fusionando SAT",
+              reconciling: "Conciliando",
+              syncing_avc: "Sincronizando AVC",
+            };
+            setActivity({label:labels[processing.state] || "Actualizando", detail:processing.detail || "en segundo plano"});
+            return;
+          }
+
           const statusSig = [
             s.date || date,
             s.avc_events || 0,
@@ -353,6 +389,7 @@ function Dashboard({ onOpenLane, user }) {
               .then(r=>{ if(r&&r.ok&&r.added>0) setSyncMsg(`↺ ${r.added} SAT fusionados automáticamente`); setTimeout(()=>setSyncMsg(""),4000); })
               .catch(()=>{})
               .finally(()=>{ if (!bgReconInProgressRef.current && !syncing && !bgSyncing) setActivity({label:"",detail:""}); });
+            return;
           }
 
           // Si no hay datos locales → auto-sync en fondo (dinámico, invisible)
@@ -422,6 +459,22 @@ function Dashboard({ onOpenLane, user }) {
 
   return (
     <div>
+      <style>{`
+        @keyframes auditec-flow {
+          0% { transform: translateX(-35%); opacity: 0; }
+          18% { opacity: 0.8; }
+          82% { opacity: 0.8; }
+          100% { transform: translateX(135%); opacity: 0; }
+        }
+        @keyframes auditec-pulse {
+          0%, 100% { transform: scale(0.72); opacity: 0.35; }
+          50% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes auditec-soft-breathe {
+          0%, 100% { box-shadow: 0 0 0 rgba(77,127,224,0); }
+          50% { box-shadow: 0 0 22px rgba(77,127,224,0.18); }
+        }
+      `}</style>
       {/* Toolbar */}
       <div style={dashStyles.toolbar}>
         <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
@@ -452,6 +505,7 @@ function Dashboard({ onOpenLane, user }) {
           </button>
         </div>
       </div>
+      <ProcessingRibbon activity={activity}/>
 
       {/* Mensajes */}
       {(apiErr||syncMsg) && (
@@ -657,7 +711,14 @@ const dashStyles = {
   select:       {background:"#0d1525",border:"1px solid #2a3045",borderRadius:7,padding:"7px 12px",color:"#e8edf5",fontSize:13,fontFamily:"inherit",outline:"none"},
   primaryBtn:   {display:"flex",alignItems:"center",gap:7,background:"#4d7fe0",border:"none",borderRadius:8,padding:"9px 16px",color:"#080d1a",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",flexShrink:0},
   secondaryBtn: {display:"flex",alignItems:"center",gap:7,background:"transparent",border:"1px solid #2a3045",borderRadius:8,padding:"8px 14px",color:"#8a9ab5",fontSize:13,cursor:"pointer",fontFamily:"inherit",flexShrink:0},
-  busyPill:     {display:"inline-flex",alignItems:"center",gap:7,background:"rgba(77,127,224,0.08)",border:"1px solid rgba(77,127,224,0.25)",borderRadius:7,padding:"5px 9px",color:"#8a9ab5",fontSize:11,whiteSpace:"nowrap"},
+  busyPill:     {display:"inline-flex",alignItems:"center",gap:7,background:"rgba(77,127,224,0.08)",border:"1px solid rgba(77,127,224,0.25)",borderRadius:7,padding:"5px 9px",color:"#8a9ab5",fontSize:11,whiteSpace:"nowrap",animation:"auditec-soft-breathe 2.6s ease-in-out infinite"},
+  processingRibbon: {position:"relative",overflow:"hidden",border:"1px solid rgba(77,127,224,0.24)",background:"linear-gradient(90deg,rgba(77,127,224,0.08),rgba(34,201,123,0.06),rgba(91,156,246,0.08))",borderRadius:8,margin:"-4px 0 14px",minHeight:42},
+  processingGlow: {position:"absolute",inset:0,width:"42%",background:"linear-gradient(90deg,transparent,rgba(77,127,224,0.22),transparent)",animation:"auditec-flow 2.8s ease-in-out infinite"},
+  processingContent: {position:"relative",display:"flex",alignItems:"center",gap:12,padding:"9px 13px"},
+  processingPulse: {display:"flex",gap:4,alignItems:"center",flexShrink:0},
+  processingDot: {width:6,height:6,borderRadius:6,background:"#4d7fe0",display:"block",animation:"auditec-pulse 1.2s ease-in-out infinite"},
+  processingTitle: {fontSize:12,color:"#e8edf5",fontWeight:700},
+  processingDetail: {fontSize:11,color:"#8a9ab5",marginTop:2},
   kpiStrip:     {display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12,marginBottom:24},
   kpiCard:      {background:"#0d1525",border:"1px solid #2a3045",borderRadius:10,padding:"14px 18px",display:"flex",alignItems:"center",gap:12},
   laneGrid:     {display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:14,marginBottom:24},

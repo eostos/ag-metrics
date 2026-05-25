@@ -50,6 +50,8 @@ from engine import (
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 MERGED_DIR = os.path.expanduser("~/sat_merged")
 WATCH_DIR  = "/home/sftpuser/uploads"
+AVC_SYNC_INTERVAL_SECONDS = int(os.environ.get("AUDITEC_AVC_SYNC_INTERVAL_SECONDS", "300"))
+AVC_SYNC_ENABLED = os.environ.get("AUDITEC_AVC_SYNC_ENABLED", "1").lower() not in ("0", "false", "no")
 
 app = FastAPI(title="AG-metrics API", docs_url="/api/docs")
 
@@ -321,6 +323,7 @@ def _fetch_and_store(source_id: int, source_type: str, source_config: Dict,
     synced_at = _now()
     ac = _auto_cols_avc(df)
 
+    changed_records = 0
     with _db() as c:
         for _, row in df.iterrows():
             event_id = str(row.get(ac["id"], "") or row.get("id", ""))
@@ -341,6 +344,15 @@ def _fetch_and_store(source_id: int, source_type: str, source_config: Dict,
             except Exception:
                 axles_int = None
 
+            existing = c.execute("""
+                SELECT lane_name,vehicle_type,axle_count,event_timestamp,
+                       vehicle_image_url,vehicle_image_path,extra_json
+                FROM avc_local_events WHERE event_id=? AND source_id=?
+            """, (event_id, source_id)).fetchone()
+            new_values = (lane_val, vtype, axles_int, ts, img_url, img_path, extra)
+            if not existing or tuple(existing) != new_values:
+                changed_records += 1
+
             c.execute("""
                 INSERT OR REPLACE INTO avc_local_events
                 (event_id,source_id,event_date,lane_name,vehicle_type,axle_count,
@@ -350,10 +362,11 @@ def _fetch_and_store(source_id: int, source_type: str, source_config: Dict,
                   ts, img_url, img_path, extra, synced_at))
 
         c.execute("UPDATE avc_sources SET last_sync=? WHERE id=?", (synced_at, source_id))
-        # Invalidar caché de conciliación para esta fecha: los timestamps pueden haber cambiado
-        # Así la próxima apertura de un carril re-concilia con los datos corregidos
-        c.execute("DELETE FROM recon_cache WHERE cache_key LIKE ?", (f"%::{date_str}",))
+        if changed_records:
+            # Invalidar caché de conciliación para esta fecha: los timestamps pueden haber cambiado.
+            c.execute("DELETE FROM recon_cache WHERE cache_key LIKE ?", (f"%::{date_str}",))
 
+    df.attrs["changed_records"] = changed_records
     return df
 
 
@@ -439,6 +452,72 @@ def _recon_summary(result: pd.DataFrame) -> Dict:
             "satOnly":sat_only,"axleErr":axle_err,
             "matchRate":detect_rate}
 
+
+def _reconcile_date_cache(day_str: str) -> None:
+    fecha = datetime.strptime(day_str, "%Y%m%d").date().isoformat()
+    lock_fh = None
+    try:
+        lock_fh = open(f"/tmp/auditec_reconcile_{day_str}.lock", "w")
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        return
+
+    try:
+        _set_processing_status(fecha, "reconciling", "Conciliando carriles")
+        sat_df = _load_sat_merged(day_str)
+        sc = _auto_cols_sat(sat_df)
+        if not all(sc.values()):
+            _set_processing_status(fecha, "error", "Columnas SAT incompletas")
+            return
+
+        sat_lanes = sorted(sat_df[sc["voie"]].dropna().astype(str).str.strip().unique().tolist())
+        cfg = load_saved_settings()
+        try:
+            lane_mapping = json.loads(cfg.get("lane_mapping") or "{}")
+        except Exception:
+            lane_mapping = {}
+
+        with _db() as c:
+            sources = c.execute("SELECT * FROM avc_sources WHERE enabled=1").fetchall()
+
+        for src in sources:
+            avc_df = _events_from_local(src["id"], datetime.strptime(fecha, "%Y-%m-%d").date())
+            if avc_df.empty:
+                continue
+            ac = _auto_cols_avc(avc_df)
+            if not all(ac.values()) or ac["device"] not in avc_df.columns:
+                continue
+            for lane_id in sorted(avc_df[ac["device"]].dropna().astype(str).unique()):
+                sat_lane = lane_mapping.get(lane_id)
+                if not sat_lane:
+                    sat_lane = next((v for v in sat_lanes if v == lane_id or v in lane_id or lane_id in v), "")
+                if not sat_lane and sat_lanes:
+                    sat_lane = sat_lanes[0]
+                if not sat_lane:
+                    continue
+                result = reconcile(
+                    avc_df, sat_df, lane_id, sat_lane, fecha, 120,
+                    ac["date"], ac["device"], ac["type"], ac["axles"], ac["id"],
+                    sc["date"], sc["voie"], sc["cls"], sc["tab"], sc["num"], sc["prix"],
+                )
+                if not result.empty:
+                    _save_cache(lane_id, fecha, result, _recon_summary(result), src["id"])
+                    _save_cache(lane_id, fecha, result, _recon_summary(result), 0)
+        _set_processing_status(fecha, "ready", "Conciliación actualizada")
+    except Exception as exc:
+        _set_processing_status(fecha, "error", str(exc))
+    finally:
+        try:
+            if lock_fh:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                lock_fh.close()
+        except Exception:
+            pass
+
+
+def _start_reconcile_date_cache(day_str: str) -> None:
+    threading.Thread(target=_reconcile_date_cache, args=(day_str,), daemon=True).start()
+
 def _cache_key(lane: str, fecha: str, source_id: int = 0) -> str:
     return f"{source_id}::{lane}::{fecha}"
 
@@ -477,6 +556,25 @@ def _set_app_setting_json(key: str, value: Any) -> None:
             "INSERT OR REPLACE INTO app_settings(setting_key,setting_value,updated_at) VALUES(?,?,?)",
             (key, json.dumps(value), _now()),
         )
+
+
+def _processing_status_key(date_str: str) -> str:
+    return f"processing_status::{date_str}"
+
+
+def _set_processing_status(date_str: str, state: str, detail: str = "") -> None:
+    _set_app_setting_json(_processing_status_key(date_str), {
+        "state": state,
+        "detail": detail,
+        "updated_at": _now(),
+    })
+
+
+def _get_processing_status(date_str: str) -> Dict[str, Any]:
+    status = _get_app_setting_json(_processing_status_key(date_str), {})
+    if not isinstance(status, dict) or not status.get("state"):
+        return {"state": "ready", "detail": "", "updated_at": ""}
+    return status
 
 
 def _setting_list(key: str) -> List[Dict[str, Any]]:
@@ -1136,6 +1234,8 @@ async def sync_source(sid: int, request: Request, user=Depends(_get_user)):
     try:
         d  = datetime.strptime(fecha_str, "%Y-%m-%d").date()
         df = _fetch_and_store(sid, stype, cfg, d, lane)
+        if int(df.attrs.get("changed_records") or 0):
+            _start_reconcile_date_cache(d.strftime("%Y%m%d"))
         return {"ok": True, "records": len(df), "date": fecha_str}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -1321,8 +1421,10 @@ def get_status(query_date: str = "", user=Depends(_get_user)):
     # SAT merged: transacciones y carriles
     mp = os.path.join(MERGED_DIR, f"SAT-TEXCOCO-{day_str}-MERGED.json")
     sat_merged, sat_lanes = 0, []
+    sat_updated_at = ""
     if os.path.exists(mp):
         try:
+            sat_updated_at = datetime.fromtimestamp(os.path.getmtime(mp)).isoformat()
             with open(mp, "r", encoding="utf-8") as fh:
                 mdata = json.load(fh)
             sat_merged = len(mdata.get("transactions", []))
@@ -1346,6 +1448,10 @@ def get_status(query_date: str = "", user=Depends(_get_user)):
         src_rows = c.execute(
             "SELECT id,name,type,last_sync,enabled FROM avc_sources ORDER BY id"
         ).fetchall()
+        avc_last_synced_row = c.execute(
+            "SELECT MAX(synced_at) AS last_synced FROM avc_local_events WHERE event_date=?",
+            (date_str,),
+        ).fetchone()
 
     avc_lanes = sorted(r["lane_name"] for r in avc_lane_rows if r["lane_name"])
 
@@ -1359,13 +1465,16 @@ def get_status(query_date: str = "", user=Depends(_get_user)):
         "date":         date_str,
         "sat_pending":  len(pending_files),
         "sat_merged":   sat_merged,
+        "sat_updated_at": sat_updated_at,
         "sat_lanes":    sat_lanes,
         "avc_events":   int(avc_count),
+        "avc_updated_at": avc_last_synced_row["last_synced"] if avc_last_synced_row else "",
         "avc_lanes":    avc_lanes,
         "sources":      [{"id":r["id"],"name":r["name"],"type":r["type"],
                            "last_sync":r["last_sync"],"enabled":bool(r["enabled"])} for r in src_rows],
         "timezone":     cfg.get("timezone", "America/Mexico_City"),
         "lane_mapping": lane_mapping,
+        "processing":    _get_processing_status(date_str),
         "timestamp":    _now(),
     }
 
@@ -2135,7 +2244,9 @@ async def send_test_alarm_email(request: Request, user=Depends(_require_admin)):
 async def merge_sat(request: Request, user=Depends(_get_user)):
     body    = await request.json()
     day_str = body.get("day", date.today().strftime("%Y%m%d"))
+    fecha = datetime.strptime(day_str, "%Y%m%d").date().isoformat()
     os.makedirs(MERGED_DIR, exist_ok=True)
+    _set_processing_status(fecha, "merging_sat", "Fusionando archivos SAT")
 
     pattern = os.path.join(WATCH_DIR, f"SAT-TEXCOCO-{day_str}*.json")
     files   = sorted([f for f in glob.glob(pattern)
@@ -2176,6 +2287,10 @@ async def merge_sat(request: Request, user=Depends(_get_user)):
     with open(tmp,"w",encoding="utf-8") as fh:
         json.dump(merged, fh, ensure_ascii=False)
     os.replace(tmp, mp)
+    if added:
+        _start_reconcile_date_cache(day_str)
+    else:
+        _set_processing_status(fecha, "ready", "SAT sin cambios nuevos")
     return {"ok":True,"added":added,"skipped":skipped,"total":len(merged["transactions"]),"path":mp}
 
 
@@ -2265,6 +2380,7 @@ async def update_user(uid: int, request: Request, user=Depends(_require_admin)):
 
 
 _REPORT_SCHED_LOCK_FH = None
+_AVC_SYNC_LOCK_FH = None
 
 def _weekday_key(dt: datetime) -> str:
     return ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"][dt.weekday()]
@@ -2317,6 +2433,48 @@ def _start_report_scheduler_once() -> None:
     t.start()
 
 
+def _avc_sync_scheduler_loop() -> None:
+    while True:
+        try:
+            cfg = load_saved_settings()
+            tz = get_event_tz(cfg)
+            sync_day = datetime.now(tz).date()
+            total_changed = 0
+            with _db() as c:
+                sources = c.execute("SELECT * FROM avc_sources WHERE enabled=1").fetchall()
+            for src in sources:
+                try:
+                    source_cfg = json.loads(src["config"] or "{}")
+                    df = _fetch_and_store(src["id"], src["type"], source_cfg, sync_day)
+                    total_changed += int(df.attrs.get("changed_records") or 0)
+                except Exception:
+                    continue
+            _set_app_setting_json("avc_background_sync_last_run", {
+                "date": sync_day.isoformat(),
+                "finished_at": _now(),
+                "sources": len(sources),
+                "changed_records": total_changed,
+            })
+            if total_changed:
+                _start_reconcile_date_cache(sync_day.strftime("%Y%m%d"))
+        except Exception:
+            pass
+        time.sleep(max(60, AVC_SYNC_INTERVAL_SECONDS))
+
+
+def _start_avc_sync_scheduler_once() -> None:
+    global _AVC_SYNC_LOCK_FH
+    if not AVC_SYNC_ENABLED:
+        return
+    try:
+        _AVC_SYNC_LOCK_FH = open("/tmp/auditec_avc_sync_scheduler.lock", "w")
+        fcntl.flock(_AVC_SYNC_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        return
+    t = threading.Thread(target=_avc_sync_scheduler_loop, daemon=True)
+    t.start()
+
+
 # ─────────────────────────────────────────────────────────
 # Startup + static
 # ─────────────────────────────────────────────────────────
@@ -2325,6 +2483,7 @@ def _start_report_scheduler_once() -> None:
 def startup():
     _ensure_schema()
     _start_report_scheduler_once()
+    _start_avc_sync_scheduler_once()
 
 frontend_dir = os.path.join(BASE_DIR, "frontend")
 
