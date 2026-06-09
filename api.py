@@ -2363,7 +2363,7 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
             "avc_amount": round(avc_counts.get(cls, 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0)), 2),
             "sat_amount": round(sat_amounts.get(cls, 0.0), 2),
             "amount_delta": round(
-                (avc_counts.get(cls, 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0))) - sat_amounts.get(cls, 0.0),
+                sat_amounts.get(cls, 0.0) - (avc_counts.get(cls, 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0))),
                 2,
             ),
             "lanes":    [
@@ -2375,7 +2375,7 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
                     "avc_amount": round(counts.get("avc", 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0)), 2),
                     "sat_amount": round(counts.get("sat_amount", 0.0), 2),
                     "amount_delta": round(
-                        (counts.get("avc", 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0))) - counts.get("sat_amount", 0.0),
+                        counts.get("sat_amount", 0.0) - (counts.get("avc", 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0))),
                         2,
                     ),
                 }
@@ -2398,7 +2398,7 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
         "money": {
             "avc_amount": round(total_avc_amount, 2),
             "sat_amount": round(total_sat_amount, 2),
-            "amount_delta": round(total_avc_amount - total_sat_amount, 2),
+            "amount_delta": round(total_sat_amount - total_avc_amount, 2),
             "currency": "MXN",
             "method": "SP real por sat_prix; AVC estimado con tarifas AVC configuradas. Si falta una clase, usa la tarifa SP mas frecuente como respaldo.",
         },

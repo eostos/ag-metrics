@@ -651,7 +651,7 @@ function ClassBreakdown({ date, onOpenLane }) {
     const isMoto = b.class_id === 15;
     const deltaColor = delta > 0 ? "#ff7e3f" : delta < 0 ? "#5b9cf6" : "#22c97b";
     const amountDelta = Number(b.amount_delta || 0);
-    const amountColor = amountDelta > 0 ? "#ff7e3f" : amountDelta < 0 ? "#5b9cf6" : "#22c97b";
+    const amountColor = amountDelta < 0 ? "#ff4c6a" : amountDelta > 0 ? "#22c97b" : "#22c97b";
     return (
       <div style={{
         background: isMoto ? "rgba(91,156,246,0.07)" : "#0f1928",
@@ -786,7 +786,7 @@ function ClassBreakdown({ date, onOpenLane }) {
         </div>
         <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
           <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>Diferencia neta</div>
-          <div style={{fontSize:20,fontWeight:800,color:money.amount_delta > 0 ? "#ff7e3f" : money.amount_delta < 0 ? "#5b9cf6" : "#22c97b",marginTop:4}}>
+          <div style={{fontSize:20,fontWeight:800,color:money.amount_delta < 0 ? "#ff4c6a" : "#22c97b",marginTop:4}}>
             {money.amount_delta > 0 ? "+" : ""}{moneyFmt(money.amount_delta)}
           </div>
         </div>
