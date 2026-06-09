@@ -199,82 +199,296 @@ function escapeHtml(value) {
   return String(value == null ? "" : value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
-function openPrintableReport(form, preview, targetWin) {
+function rptMoney(v) { return "$" + Number(v||0).toLocaleString("es-MX",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function rptPct(v) { return Number(v||0).toFixed(1) + "%"; }
+function rptRateColor(v) { const n=Number(v||0); return n>=97?"#14965a":n>=93?"#b88900":"#d92d53"; }
+
+const CLASS_NAMES_MAP = {1:"Auto",2:"C2",3:"C3",4:"C4",5:"C5",6:"C6",7:"C7",8:"C8",9:"C9+",10:"AR1",11:"AR2",12:"B2",13:"B3",14:"B4",15:"Moto"};
+const MOTIVE_LABELS_MAP = {
+  SAT_no_detecto:"AVC sin SAT en ventana", clase_distinta:"Clase incompatible",
+  error_conteo_avc:"Error conteo AVC", moto_detectada_solo_por_avc:"Moto solo AVC",
+  AVC_no_detecto:"SAT sin AVC", moto_SAT_sin_AVC:"Moto SAT sin AVC", SAT_clase_indefinida:"SAT clase indefinida",
+};
+
+function openPrintableReport(form, preview, hourly, targetWin) {
+  // Support old 3-arg call: openPrintableReport(form, preview, targetWin)
+  if (hourly && !Array.isArray(hourly) && typeof hourly !== "object") { targetWin = hourly; hourly = null; }
+  if (hourly && !Array.isArray(hourly) && hourly.document) { targetWin = hourly; hourly = null; }
+
   const rows = reportPreviewRows(form, preview);
   const totals = reportPreviewTotals(rows);
-  const maxValue = Math.max(...rows.map(r => Number(r.total || 0)), 1);
-  const chartRows = rows.slice(0, 12).map(r => {
-    const matched = Number(r.matched || 0);
-    const avcOnly = Number(r.avcOnly || 0);
-    const satOnly = Number(r.satOnly || 0);
-    const axleErr = Number(r.axleErr || 0);
-    const total = Math.max(Number(r.total || 0), 1);
-    const rowWidth = Math.max(8, Math.round(Number(r.total || 0) / maxValue * 100));
-    const segment = (value) => Math.max(value ? 4 : 0, Math.round(value / total * 100));
+  const sat_money = rows.reduce((s,r) => s + Number(r.sat_money||0), 0);
+  const avc_money = rows.reduce((s,r) => s + Number(r.avc_money||0), 0);
+  const money_delta = avc_money - sat_money;
+  const generatedAt = new Date().toLocaleString();
+
+  const classBreakdown = (preview && preview.class_breakdown) || [];
+  const motiveBreakdown = (preview && preview.motive_breakdown) || [];
+  const worstRows = (preview && preview.worst_rows) || [];
+
+  // ── CSS bar chart: detección por carril ──
+  const maxTotal = Math.max(...rows.map(r => Number(r.total||0)), 1);
+  const laneBarRows = rows.slice(0,14).map(r => {
+    const tot = Math.max(Number(r.total||0),1);
+    const rw = Math.max(6, Math.round(Number(r.total||0)/maxTotal*100));
+    const seg = v => Math.max(v?3:0, Math.round(Number(v||0)/tot*100));
+    const rc = rptRateColor(r.matchRate);
     return `<div class="bar-row">
       <div class="bar-label"><strong>${escapeHtml(r.lane)}</strong><span>${escapeHtml(r.date)}</span></div>
-      <div class="bar-shell" style="width:${rowWidth}%">
-        <div class="seg matched" style="width:${segment(matched)}%"></div>
-        <div class="seg avc" style="width:${segment(avcOnly)}%"></div>
-        <div class="seg sat" style="width:${segment(satOnly)}%"></div>
-        <div class="seg axle" style="width:${segment(axleErr)}%"></div>
+      <div class="bar-shell" style="width:${rw}%">
+        <div class="seg matched" style="width:${seg(r.matched)}%"></div>
+        <div class="seg avc" style="width:${seg(r.avcOnly)}%"></div>
+        <div class="seg sat" style="width:${seg(r.satOnly)}%"></div>
       </div>
-      <strong>${opNum(r.total)}</strong>
+      <div class="bar-end"><strong>${opNum(r.total)}</strong><span style="color:${rc}">${rptPct(r.matchRate)}</span></div>
     </div>`;
   }).join("");
-  const tableRows = rows.slice(0, 40).map(r => `
-    <tr>
-      <td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.lane)}</td><td>${opNum(r.total)}</td><td>${opNum(r.matched)}</td>
-      <td>${opNum(r.avcOnly)}</td><td>${opNum(r.satOnly)}</td><td>${opNum(r.axleErr)}</td><td>${r.discrepancyRate || 0}%</td>
-    </tr>
-  `).join("");
-  const generatedAt = new Date().toLocaleString();
+
+  // ── Motivos ──
+  const motivesHtml = motiveBreakdown.slice(0,8).map(m =>
+    `<div class="motive-row"><span>${escapeHtml(MOTIVE_LABELS_MAP[m.motivo]||m.motivo)}</span><strong>${opNum(m.count)}</strong></div>`
+  ).join("") || '<p style="color:#64748b;font-size:11px">Sin discrepancias registradas</p>';
+
+  // ── Peores carriles ──
+  const worstHtml = worstRows.slice(0,6).map(r =>
+    `<tr><td>${escapeHtml(r.date)}</td><td style="color:#2f5fb7;font-weight:600">${escapeHtml(r.lane)}</td><td style="color:#d92d53;font-weight:700">${rptPct(r.discrepancyRate)}</td><td>${opNum(r.discrepancyCount)} casos</td></tr>`
+  ).join("") || `<tr><td colspan="4" style="color:#64748b">Sin datos</td></tr>`;
+
+  // ── Tabla de clases ──
+  const classHtml = classBreakdown.map(cb => {
+    const name = CLASS_NAMES_MAP[parseInt(cb.class_id)] || `Cls ${cb.class_id}`;
+    const d = Number(cb.delta||0);
+    const md = Number(cb.money_delta||0);
+    const dc = d>0?"#14965a":d<0?"#d92d53":"#475569";
+    const mc = md>500?"#d92d53":md<-500?"#b88900":"#475569";
+    return `<tr>
+      <td style="color:#2f5fb7;font-weight:600">C${cb.class_id}–${escapeHtml(name)}</td>
+      <td>${opNum(cb.avc)}</td><td>${opNum(cb.sat)}</td>
+      <td style="color:${dc};font-weight:${d?"700":"400"}">${d>0?"+":""}${d}</td>
+      <td style="color:#1d4ed8">${rptMoney(cb.sat_money)}</td>
+      <td style="color:#c2410c">${rptMoney(cb.avc_money)}</td>
+      <td style="color:${mc}">${md>=0?"+":""}${rptMoney(md)}</td>
+    </tr>`;
+  }).join("");
+  const mdColor = money_delta > 0 ? "#d92d53" : "#14965a";
+  const classTotalHtml = `<tr style="background:#f1f5f9;font-weight:700;border-top:2px solid #cbd5e1">
+    <td>TOTAL</td>
+    <td>${opNum(classBreakdown.reduce((s,cb)=>s+Number(cb.avc||0),0))}</td>
+    <td>${opNum(classBreakdown.reduce((s,cb)=>s+Number(cb.sat||0),0))}</td>
+    <td></td>
+    <td style="color:#1d4ed8">${rptMoney(sat_money)}</td>
+    <td style="color:#c2410c">${rptMoney(avc_money)}</td>
+    <td style="color:${mdColor};font-weight:700">${money_delta>=0?"+":""}${rptMoney(money_delta)}</td>
+  </tr>`;
+
+  // ── Tabla detalle ──
+  const tableRows = rows.slice(0,50).map(r => `<tr>
+    <td style="font-family:monospace;color:#64748b">${escapeHtml(r.date)}</td>
+    <td style="color:#2f5fb7;font-weight:600">${escapeHtml(r.lane)}</td>
+    <td>${opNum(r.total)}</td>
+    <td style="color:#14965a">${opNum(r.matched)}</td>
+    <td style="color:${Number(r.avcOnly)>0?"#c2410c":"#64748b"}">${opNum(r.avcOnly)}</td>
+    <td style="color:${Number(r.satOnly)>0?"#1d4ed8":"#64748b"}">${opNum(r.satOnly)}</td>
+    <td style="color:${rptRateColor(r.matchRate)};font-weight:700">${rptPct(r.matchRate)}</td>
+    <td style="color:${Number(r.discrepancyRate)>5?"#d92d53":"#64748b"}">${rptPct(r.discrepancyRate)}</td>
+    <td style="color:#1d4ed8">${rptMoney(r.sat_money)}</td>
+    <td style="color:#c2410c">${rptMoney(r.avc_money)}</td>
+  </tr>`).join("");
+
+  // ── Hourly data serialized for Chart.js in new window ──
+  const hourlyJson = JSON.stringify(hourly || []);
+
   const html = `<!doctype html>
-<html><head><meta charset="utf-8"/><title>${escapeHtml(form.name || form.type)}</title>
+<html><head><meta charset="utf-8"/>
+<title>${escapeHtml(form.name || form.type || "Reporte AG-metrics")}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
-*{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important} body{font-family:Arial,Helvetica,sans-serif;color:#111827;margin:0;background:#f3f6fb}
-.page{max-width:1080px;margin:0 auto;background:#fff;min-height:100vh;padding:30px 34px 36px}
-.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.print-btn{background:#4d7fe0;color:#fff;border:0;border-radius:7px;padding:9px 14px;font-weight:700;cursor:pointer}
-.header{display:grid;grid-template-columns:170px 1fr auto;gap:22px;align-items:center;border-bottom:3px solid #111827;padding-bottom:20px}
-.logo-box{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff;display:flex;align-items:center;justify-content:center;min-height:86px}
-.logo{max-width:138px;max-height:64px;object-fit:contain}.brand{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:#64748b;font-weight:700}
-h1{margin:5px 0 6px;font-size:25px;line-height:1.15}.meta{color:#64748b;font-size:12px;line-height:1.55}.badge{display:inline-block;background:#eaf1ff;color:#2f5fb7;border:1px solid #c7d8ff;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700}
-.summary{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin:18px 0}.summary-card{border:1px solid #dbe3ef;border-radius:10px;padding:13px 15px;background:#fbfdff}.summary-card h2{font-size:13px;margin:0 0 8px}.summary-card p{margin:4px 0;color:#475569;font-size:12px}
-.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0}.kpi{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff;box-shadow:0 1px 0 rgba(15,23,42,.04)}.kpi span{display:block;color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px}.kpi strong{display:block;font-size:22px;margin-top:5px}.kpi.good strong{color:#14965a}.kpi.warn strong{color:#b88900}.kpi.bad strong{color:#d92d53}.kpi.info strong{color:#2f5fb7}
-.section{margin-top:24px;border:1px solid #dbe3ef;border-radius:10px;padding:16px;background:#fff}.section h2{font-size:15px;margin:0 0 12px}.legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:11px;color:#475569}.dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}.matched-dot{background:#22c97b}.avc-dot{background:#ff7e3f}.sat-dot{background:#5b9cf6}.axle-dot{background:#f5d433}
-.bar-row{display:grid;grid-template-columns:145px 1fr 58px;gap:10px;align-items:center;margin:10px 0;font-size:11px}.bar-label strong{display:block;color:#111827}.bar-label span{display:block;color:#64748b;margin-top:2px}.bar-shell{height:18px;background:#eef2f7;border-radius:999px;overflow:hidden;display:flex;min-width:32px}.seg{height:18px}.matched{background:#22c97b}.avc{background:#ff7e3f}.sat{background:#5b9cf6}.axle{background:#f5d433}
-table{width:100%;border-collapse:separate;border-spacing:0;margin-top:10px;font-size:11px;overflow:hidden;border:1px solid #dbe3ef;border-radius:8px}th,td{padding:8px 9px;text-align:left;border-bottom:1px solid #e5eaf2}th{background:#f1f5f9;color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:.45px}tr:last-child td{border-bottom:0}.footer{display:flex;justify-content:space-between;margin-top:24px;color:#64748b;font-size:10px;border-top:1px solid #dbe3ef;padding-top:12px}
-@page{margin:12mm}@media print{body{background:#fff}.page{padding:18px;max-width:none}.toolbar{display:none}.section{break-inside:avoid}.kpis{break-inside:avoid}}
+*{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+body{font-family:Arial,Helvetica,sans-serif;color:#111827;margin:0;background:#f3f6fb;font-size:12px}
+.page{max-width:1100px;margin:0 auto;background:#fff;padding:28px 32px 36px}
+.toolbar{display:flex;justify-content:flex-end;margin-bottom:14px;gap:8px}
+.print-btn{background:#4d7fe0;color:#fff;border:0;border-radius:7px;padding:9px 16px;font-weight:700;cursor:pointer;font-size:13px}
+/* Header */
+.header{display:grid;grid-template-columns:120px 1fr auto;gap:18px;align-items:center;border-bottom:3px solid #111827;padding-bottom:16px;margin-bottom:18px}
+.logo-box{border:1px solid #dbe3ef;border-radius:8px;padding:8px;background:#fff;display:flex;align-items:center;justify-content:center;min-height:68px}
+.logo{max-width:106px;max-height:52px;object-fit:contain}
+.brand{font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#64748b;font-weight:700}
+h1{margin:3px 0 4px;font-size:22px;line-height:1.2}
+.meta{color:#64748b;font-size:11px;line-height:1.5}
+.badge{display:inline-block;background:#eaf1ff;color:#2f5fb7;border:1px solid #c7d8ff;border-radius:999px;padding:4px 10px;font-size:10px;font-weight:700}
+/* KPI grids */
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:8px}
+.kpis-money{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:18px}
+.kpi{border:1px solid #dbe3ef;border-radius:8px;padding:10px 12px;background:#fff}
+.kpi span{display:block;color:#64748b;font-size:9px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.kpi strong{display:block;font-size:20px;font-weight:700}
+/* Sections */
+.section{margin-bottom:16px;border:1px solid #dbe3ef;border-radius:8px;padding:13px 15px;background:#fff;break-inside:avoid}
+.section h2{font-size:13px;font-weight:700;margin:0 0 12px;color:#111827}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px}
+/* Legend */
+.legend{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;font-size:10px;color:#475569}
+.dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:3px;vertical-align:middle}
+/* Bar chart CSS */
+.bar-row{display:grid;grid-template-columns:120px 1fr 72px;gap:6px;align-items:center;margin:5px 0;font-size:10px}
+.bar-label strong{display:block;color:#111827;font-size:10px}
+.bar-label span{display:block;color:#64748b;font-size:9px}
+.bar-shell{height:13px;background:#eef2f7;border-radius:999px;overflow:hidden;display:flex;min-width:20px}
+.seg{height:13px}.matched{background:#22c97b}.avc{background:#ff7e3f}.sat{background:#5b9cf6}
+.bar-end{text-align:right}.bar-end strong{font-size:11px}.bar-end span{display:block;font-size:9px}
+/* Chart canvas */
+.chart-wrap{position:relative;height:220px}
+/* Motives */
+.motive-row{display:flex;justify-content:space-between;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:5px 9px;margin:3px 0;font-size:11px}
+.motive-row strong{color:#c2410c;font-weight:700}
+/* Tables */
+table{width:100%;border-collapse:collapse;font-size:10px}
+th{background:#f1f5f9;color:#475569;font-size:9px;text-transform:uppercase;letter-spacing:.4px;padding:7px 8px;text-align:left;border-bottom:2px solid #e2e8f0}
+td{padding:5px 8px;border-bottom:1px solid #e5eaf2;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+/* Footer */
+.footer{display:flex;justify-content:space-between;margin-top:18px;color:#64748b;font-size:9px;border-top:1px solid #dbe3ef;padding-top:10px}
+@page{margin:10mm}
+@media print{
+  body{background:#fff}.page{padding:14px;max-width:none}
+  .toolbar{display:none}.section{break-inside:avoid}.kpis,.kpis-money,.two-col{break-inside:avoid}
+}
 </style></head>
-<body>
-<div class="page">
-<div class="toolbar"><button class="print-btn" onclick="window.print()">Print / Save as PDF</button></div>
+<body><div class="page">
+
+<div class="toolbar">
+  <button class="print-btn" onclick="window.print()">&#128438; Imprimir / Guardar PDF</button>
+</div>
+
+<!-- Header con logo -->
 <div class="header">
-  <div class="logo-box"><img class="logo" src="/logo.jpeg" alt="AG Holdings"/></div>
+  <div class="logo-box"><img class="logo" src="/logo.jpeg" onerror="this.style.display='none'" alt="AG-metrics"/></div>
   <div>
-    <div class="brand">AG-metrics Toll Audit Platform</div>
-    <h1>${escapeHtml(form.name || form.type)}</h1>
-    <div class="meta">${escapeHtml(form.plaza || "")} · ${escapeHtml(form.type)}<br/>${escapeHtml(preview?.date_from || "")} to ${escapeHtml(preview?.date_to || "")} · Generated ${escapeHtml(generatedAt)}</div>
+    <div class="brand">AG-metrics · Plataforma de Auditoría AVC/SAT</div>
+    <h1>${escapeHtml(form.name || form.type || "Reporte de Auditoría")}</h1>
+    <div class="meta">
+      ${escapeHtml(form.plaza || "")} &nbsp;·&nbsp;
+      ${escapeHtml(preview?.date_from || "")} al ${escapeHtml(preview?.date_to || "")} &nbsp;·&nbsp;
+      Carriles: ${escapeHtml((form.lanes||[]).join(", ") || "Todos los disponibles")} &nbsp;·&nbsp;
+      Generado: ${escapeHtml(generatedAt)}
+    </div>
   </div>
   <div><span class="badge">${escapeHtml(form.template || "Standard PDF")}</span></div>
 </div>
+
+<!-- KPIs operativos -->
 <div class="kpis">
-  <div class="kpi info"><span>Total events</span><strong>${opNum(totals.total)}</strong></div>
-  <div class="kpi good"><span>Matched</span><strong>${opNum(totals.matched)}</strong></div>
-  <div class="kpi bad"><span>Discrepancies</span><strong>${opNum(totals.discrepancy)}</strong></div>
-  <div class="kpi info"><span>Detection rate</span><strong>${totals.matchRate}%</strong></div>
-  <div class="kpi warn"><span>Axle errors</span><strong>${opNum(totals.axleErr)}</strong></div>
-  <div class="kpi bad"><span>Class mismatch</span><strong>${opNum(totals.classMismatch)}</strong></div>
+  <div class="kpi"><span>Total eventos</span><strong style="color:#111827">${opNum(totals.total)}</strong></div>
+  <div class="kpi"><span>Coincidencias</span><strong style="color:#14965a">${opNum(totals.matched)}</strong></div>
+  <div class="kpi"><span>AVC sin SAT</span><strong style="color:#c2410c">${opNum(totals.avcOnly)}</strong></div>
+  <div class="kpi"><span>SAT sin AVC</span><strong style="color:#1d4ed8">${opNum(totals.satOnly)}</strong></div>
+  <div class="kpi"><span>Tasa detección</span><strong style="color:${rptRateColor(totals.matchRate)}">${rptPct(totals.matchRate)}</strong></div>
 </div>
-<div class="summary">
-  <div class="summary-card"><h2>Report scope</h2><p><strong>Lanes:</strong> ${escapeHtml((form.lanes || []).join(", ") || "All available lanes")}</p><p><strong>Frequency:</strong> ${escapeHtml(form.frequency || "Manual only")}</p><p><strong>Recipients:</strong> ${escapeHtml(form.recipients || form.contact_group || "Not configured")}</p></div>
-  <div class="summary-card"><h2>Included sections</h2><p>KPI indicators</p><p>Lane/day discrepancy chart</p><p>Detail table with reconciliation totals</p></div>
+
+<!-- KPIs económicos -->
+<div class="kpis-money">
+  <div class="kpi" style="border-color:#bfdbfe"><span>SAT Facturado (real)</span><strong style="color:#1d4ed8">${rptMoney(sat_money)}</strong></div>
+  <div class="kpi" style="border-color:#fed7aa"><span>AVC Estimado (tarifas config.)</span><strong style="color:#c2410c">${rptMoney(avc_money)}</strong></div>
+  <div class="kpi" style="border-color:${money_delta>0?"#fecaca":"#bbf7d0"}">
+    <span>Delta AVC − SAT</span>
+    <strong style="color:${mdColor}">${money_delta>=0?"+":""}${rptMoney(money_delta)}</strong>
+  </div>
 </div>
-<div class="section"><h2>Results by lane and day</h2><div class="legend"><span><i class="dot matched-dot"></i>Matched</span><span><i class="dot avc-dot"></i>AVC only</span><span><i class="dot sat-dot"></i>SAT only</span><span><i class="dot axle-dot"></i>Axle errors</span></div>${chartRows || '<p class="meta">No data available</p>'}</div>
-<div class="section"><h2>Detail table</h2><table><thead><tr><th>Date</th><th>Lane</th><th>Total</th><th>Matched</th><th>AVC only</th><th>SAT only</th><th>Axle errors</th><th>Discrepancy rate</th></tr></thead><tbody>${tableRows}</tbody></table></div>
-<div class="footer"><span>AG-metrics · AVC/SAT Audit Report</span><span>${escapeHtml(form.template || "Standard PDF")}</span></div>
+
+<!-- Gráficas: detección por carril + flujo horario -->
+<div class="two-col">
+  <div class="section">
+    <h2>Detección por carril / día</h2>
+    <div class="legend">
+      <span><i class="dot" style="background:#22c97b"></i>Coincidencia</span>
+      <span><i class="dot" style="background:#ff7e3f"></i>Solo AVC</span>
+      <span><i class="dot" style="background:#5b9cf6"></i>Solo SAT</span>
+    </div>
+    ${laneBarRows || '<p style="color:#64748b;font-size:11px">Sin datos de detección</p>'}
+  </div>
+  <div class="section">
+    <h2>Flujo de eventos por hora del día</h2>
+    <div class="legend">
+      <span><i class="dot" style="background:#22c97b"></i>Match</span>
+      <span><i class="dot" style="background:#ff7e3f"></i>AVC</span>
+      <span><i class="dot" style="background:#5b9cf6"></i>SAT</span>
+    </div>
+    <div class="chart-wrap"><canvas id="hourlyChart"></canvas></div>
+  </div>
 </div>
+
+<!-- Motivos + Peores carriles -->
+<div class="two-col">
+  <div class="section">
+    <h2>Motivos de discrepancia</h2>
+    ${motivesHtml}
+  </div>
+  <div class="section">
+    <h2>Carriles con mayor discrepancia</h2>
+    <table><tbody>${worstHtml}</tbody></table>
+  </div>
+</div>
+
+<!-- Comparativa por clase -->
+<div class="section">
+  <h2>Comparativa por clase — AVC vs SAT</h2>
+  <table>
+    <thead><tr><th>Clase</th><th>AVC det.</th><th>SAT trans.</th><th>Delta det.</th><th>SAT Facturado</th><th>AVC Estimado</th><th>Delta ($)</th></tr></thead>
+    <tbody>${classHtml}${classTotalHtml}</tbody>
+  </table>
+</div>
+
+<!-- Tabla detalle por día/carril -->
+<div class="section">
+  <h2>Resumen por día y carril</h2>
+  <table>
+    <thead><tr><th>Fecha</th><th>Carril</th><th>Total</th><th>Coincidencias</th><th>AVC sin SAT</th><th>SAT sin AVC</th><th>Detección</th><th>% Disc.</th><th>SAT $</th><th>AVC $</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="10" style="color:#64748b;text-align:center;padding:16px">Sin datos</td></tr>'}</tbody>
+  </table>
+</div>
+
+<div class="footer">
+  <span>AG-metrics · Reporte de Auditoría AVC/SAT</span>
+  <span>${escapeHtml(form.template || "Standard PDF")} · ${escapeHtml(preview?.date_from || "")} – ${escapeHtml(preview?.date_to || "")}</span>
+</div>
+</div>
+
+<script>
+(function() {
+  var hourly = ${hourlyJson};
+  var canvas = document.getElementById("hourlyChart");
+  if (!canvas || !window.Chart || !hourly || !hourly.length) return;
+  var active = hourly.filter(function(h){ return h.total > 0; });
+  var hStart = active.length ? active[0].hour : 0;
+  var hEnd   = active.length ? active[active.length-1].hour : 23;
+  var slice  = hourly.filter(function(h){ return h.hour >= hStart && h.hour <= hEnd; });
+  var labels = slice.map(function(h){ return (h.hour < 10 ? "0" : "") + h.hour + ":00"; });
+  new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [
+        { label:"Coincidencia", data: slice.map(function(h){return h.matched;}),  backgroundColor:"rgba(34,201,123,0.8)",  stack:"s" },
+        { label:"Solo AVC",     data: slice.map(function(h){return h.avcOnly;}),  backgroundColor:"rgba(255,126,63,0.8)",  stack:"s" },
+        { label:"Solo SAT",     data: slice.map(function(h){return h.satOnly;}),  backgroundColor:"rgba(91,156,246,0.8)",  stack:"s" },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color:"#475569", font:{ size:10 }, boxWidth:10, padding:10 } },
+        tooltip: { backgroundColor:"#1e2535", titleColor:"#e8edf5", bodyColor:"#8a9ab5" }
+      },
+      scales: {
+        x: { stacked:true, ticks:{ color:"#64748b", font:{size:8}, maxRotation:0 }, grid:{ color:"#f1f5f9" } },
+        y: { stacked:true, ticks:{ color:"#64748b", font:{size:9} }, grid:{ color:"#e5eaf2" } }
+      }
+    }
+  });
+})();
+</script>
 </body></html>`;
+
   const win = targetWin || window.open("", "_blank");
   if (!win) return;
   win.document.write(html);
@@ -453,26 +667,27 @@ function ReportsModule({ section }) {
       .finally(() => setPreviewLoading(false));
   }
   function generatePreviewPdf() {
-    if (previewData) {
-      openPrintableReport(form, previewData);
-      return;
-    }
     const pendingWin = window.open("", "_blank");
     if (pendingWin) {
-      pendingWin.document.write("<p style='font-family:Arial;padding:24px'>Generating report...</p>");
+      pendingWin.document.write("<p style='font-family:Arial;padding:24px;color:#475569'>Generando reporte...</p>");
       pendingWin.document.close();
     }
     const range = reportDateRange(form.period);
     setPreviewLoading(true);
-    window.API.get(`/api/reports/summary?date_from=${range.date_from}&date_to=${range.date_to}`)
-      .then(data => {
+    Promise.all([
+      previewData
+        ? Promise.resolve(previewData)
+        : window.API.get(`/api/reports/summary?date_from=${range.date_from}&date_to=${range.date_to}`),
+      window.API.get(`/api/reports/hourly?date_from=${range.date_from}&date_to=${range.date_to}`).catch(() => ({hourly:[]})),
+    ])
+      .then(([data, hourlyResp]) => {
         setPreviewData(data);
-        openPrintableReport(form, data, pendingWin);
-        setMsg("Printable report generated with charts and tables");
+        openPrintableReport(form, data, (hourlyResp && hourlyResp.hourly) || [], pendingWin);
+        setMsg("Reporte generado con gráficas y tablas");
       })
       .catch(e => {
         if (pendingWin) pendingWin.close();
-        setMsg(e.message || "Preview failed");
+        setMsg(e.message || "Error al generar preview");
       })
       .finally(() => setPreviewLoading(false));
   }

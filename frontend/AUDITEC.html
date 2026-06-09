@@ -30,7 +30,7 @@
   <script>
     // Limpiar caché de Babel standalone para forzar recompilación con el nuevo diseño
     (function(){
-      var ver = "20260525d";
+      var ver = "20260609a";
       if (localStorage.getItem("agm_ver") !== ver) {
         Object.keys(localStorage).forEach(function(k){
           if (k.startsWith("babel-") || k.startsWith("__babel")) localStorage.removeItem(k);
@@ -41,12 +41,12 @@
   </script>
   <script type="text/babel" src="components/MockData.jsx?v=20260525d"></script>
   <script type="text/babel" src="components/Auth.jsx?v=20260525d"></script>
-  <script type="text/babel" src="components/Layout.jsx?v=20260525d"></script>
+  <script type="text/babel" src="components/Layout.jsx?v=20260529a"></script>
   <script type="text/babel" src="components/Dashboard.jsx?v=20260525d"></script>
-  <script type="text/babel" src="components/LaneDetail.jsx?v=20260525d"></script>
-  <script type="text/babel" src="components/Config.jsx?v=20260525d"></script>
-  <script type="text/babel" src="components/Reports.jsx?v=20260525d"></script>
-  <script type="text/babel" src="components/Operations.jsx?v=20260525d"></script>
+  <script type="text/babel" src="components/LaneDetail.jsx?v=20260609a"></script>
+  <script type="text/babel" src="components/Config.jsx?v=20260609a"></script>
+  <script type="text/babel" src="components/Reports.jsx?v=20260529a"></script>
+  <script type="text/babel" src="components/Operations.jsx?v=20260529b"></script>
 
   <script type="text/babel">
     // Global API client
@@ -270,6 +270,14 @@
       return (I18N[lang] && I18N[lang][text]) || text;
     };
 
+    // Returns true only for Admin role — used to gate axle-error visibility
+    window.isAdmin = () => {
+      try {
+        const u = window._auditecUser || JSON.parse(localStorage.getItem("auditec_user") || "{}");
+        return u.role === "Admin";
+      } catch(e) { return false; }
+    };
+
     const PAGE_TITLES = {
       dashboard: { title: "Dashboard", subtitle: "Resumen de conciliación AVC/SAT por carril" },
       reports:   { title: "Reports",  subtitle: "Report configuration, templates and history" },
@@ -313,6 +321,7 @@
       function handleLogin(u) {
         setUser(u);
         localStorage.setItem("auditec_user", JSON.stringify(u));
+        window._auditecUser = u;
       }
 
       function handleLogout() {
@@ -339,7 +348,8 @@
           onNavigate={handleNavigate} title={window.t(pageInfo.title)} subtitle={window.t(pageInfo.subtitle)}>
           {view==="dashboard" && !activeLane && <Dashboard onOpenLane={handleOpenLane} user={user}/>}
           {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} initialFilter={activeLaneFilter} onBack={()=>{setActiveLane(null);setActiveLaneFilter(null);}}/>}
-          {viewRoot==="reports" && <ReportsModule section={viewSection || "list"}/>}
+          {viewRoot==="reports" && viewSection==="view" && <ReportsScreen/>}
+          {viewRoot==="reports" && viewSection!=="view" && <ReportsModule section={viewSection || "list"}/>}
           {viewRoot==="alarms" && user.role==="Admin" && <AlarmsModule section={viewSection || "active"}/>}
           {viewRoot==="notifications" && user.role==="Admin" && <NotificationsModule section={viewSection || "history"}/>}
           {viewRoot==="settings" && user.role==="Admin" && <SettingsModule/>}

@@ -688,8 +688,27 @@ function SourceModal({ source, onSave, onClose }) {
   const [name, setName] = React.useState(source.name || "");
   const [type, setType] = React.useState(source.type || "database");
   const [saving, setSaving] = React.useState(false);
+  const [testTimestamp, setTestTimestamp] = React.useState("");
+  const [testingEvidence, setTestingEvidence] = React.useState(false);
+  const [evidenceMessage, setEvidenceMessage] = React.useState("");
+  const [evidenceResult, setEvidenceResult] = React.useState(null);
+  const [evidenceLanes, setEvidenceLanes] = React.useState([]);
+  const [evidenceLane, setEvidenceLane] = React.useState("");
+  const [evidenceRequest, setEvidenceRequest] = React.useState(null);
+  const [observedCameraTime, setObservedCameraTime] = React.useState("");
 
   const f = k => v => setForm(p => ({...p, [k]:v}));
+
+  React.useEffect(()=>{
+    if (!source.id) return;
+    window.API.get(`/api/avc-source-evidence/lanes?source_id=${source.id}`)
+      .then(data=>{
+        const lanes = data.lanes||[];
+        setEvidenceLanes(lanes);
+        if (lanes.length) setEvidenceLane(lanes[0].lane_name);
+      })
+      .catch(()=>setEvidenceLanes([]));
+  },[source.id]);
 
   function handleSave() {
     setSaving(true);
@@ -699,6 +718,88 @@ function SourceModal({ source, onSave, onClose }) {
       : window.API.put(`/api/sources/${source.id}`, payload);
     req.then(()=>onSave()).catch(()=>{}).finally(()=>setSaving(false));
   }
+
+  function setRelativeTimestamp(secondsAgo) {
+    setTestTimestamp(String(Math.floor(Date.now()/1000) - secondsAgo));
+    setEvidenceMessage("");
+    setEvidenceResult(null);
+    setEvidenceRequest(null);
+    setObservedCameraTime("");
+  }
+
+  function timestampMillis(value) {
+    const raw = String(value||"").trim();
+    if (!/^\d{10,13}$/.test(raw)) return null;
+    const millis = raw.length >= 13 ? Number(raw) : Number(raw)*1000;
+    return Number.isFinite(millis) ? millis : null;
+  }
+
+  function timestampLabel(value) {
+    const millis = timestampMillis(value);
+    if (millis==null) return "";
+    try {
+      return new Date(millis).toLocaleString("es-MX", {
+        timeZone:"America/Mexico_City",
+        year:"numeric",month:"2-digit",day:"2-digit",
+        hour:"2-digit",minute:"2-digit",second:"2-digit",
+      });
+    } catch(e) {
+      return new Date(millis).toLocaleString();
+    }
+  }
+
+  function timeOnlyLabel(value) {
+    const millis = timestampMillis(value);
+    if (millis==null) return "";
+    return new Date(millis).toLocaleTimeString("es-MX", {
+      timeZone:"America/Mexico_City",
+      hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23",
+    });
+  }
+
+  function observedDriftSeconds() {
+    if (!evidenceRequest || !/^\d{1,2}:\d{2}:\d{2}$/.test(observedCameraTime.trim())) return null;
+    const expectedMillis = timestampMillis(evidenceRequest.timestamp);
+    if (expectedMillis==null) return null;
+    const [hours,minutes,seconds] = observedCameraTime.trim().split(":").map(Number);
+    if (hours>23 || minutes>59 || seconds>59) return null;
+    const expectedTime = timeOnlyLabel(evidenceRequest.timestamp).split(":").map(Number);
+    let drift = (hours*3600+minutes*60+seconds) -
+      (expectedTime[0]*3600+expectedTime[1]*60+expectedTime[2]);
+    if (drift > 43200) drift -= 86400;
+    if (drift < -43200) drift += 86400;
+    return drift;
+  }
+
+  function testEvidence() {
+    const requestTimestamp = String(testTimestamp||"").trim();
+    const lane = evidenceLanes.find(item=>item.lane_name===evidenceLane);
+    setTestingEvidence(true); setEvidenceMessage(""); setEvidenceResult(null);
+    setEvidenceRequest(null); setObservedCameraTime("");
+    window.API.post("/api/avc-source-evidence/test", {
+      source_id:source.id||null,
+      config:form,
+      lane_name:evidenceLane,
+      timestamp:requestTimestamp,
+    })
+      .then(data=>{
+        setEvidenceRequest({
+          timestamp:requestTimestamp,
+          lane_name:evidenceLane,
+          device_id:(lane&&lane.device_id)||data.device_id||"",
+        });
+        setEvidenceResult(data);
+        setEvidenceMessage(data.photo_available
+          ? "Conexión correcta y fotografía recuperada"
+          : "Conexión correcta; no hay fotografía para ese momento");
+      })
+      .catch(error=>setEvidenceMessage(`Error: ${error.message||error}`))
+      .finally(()=>setTestingEvidence(false));
+  }
+
+  const selectedTimestampLabel = timestampLabel(testTimestamp);
+  const evidenceSuccess = evidenceMessage && !evidenceMessage.startsWith("Error");
+  const observedDrift = observedDriftSeconds();
 
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}}>
@@ -769,6 +870,133 @@ function SourceModal({ source, onSave, onClose }) {
             <FormField label="Clave array JSON" value={form.events_key||""}  onChange={f("events_key")}  placeholder="data (vacío=raíz)"/>
           </div>
         </>)}
+
+        <div style={{borderTop:"1px solid #2a3045",marginTop:8,paddingTop:20}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#e8edf5",marginBottom:5}}>Evidencia AVC / NVR</div>
+          <div style={{fontSize:11,color:"#5b6a8a",lineHeight:1.45,marginBottom:16}}>
+            Configuración propia de este AVC para solicitar fotografías por dispositivo y timestamp.
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 20px"}}>
+            <FormField label="URL base Alice Guardian" value={form.evidence_base_url||""}
+              onChange={f("evidence_base_url")} placeholder="http://host:9090"/>
+            <FormField label="Client ID" value={form.evidence_client_id||""}
+              onChange={f("evidence_client_id")} placeholder="Cliente autorizado"/>
+            <FormField label="API key / Bearer token" value={form.evidence_api_key||""}
+              onChange={f("evidence_api_key")} masked placeholder="Token de integración"/>
+            <FormField label="Timeout (segundos)" type="number" value={form.evidence_timeout_seconds||"20"}
+              onChange={f("evidence_timeout_seconds")} placeholder="20"/>
+            <div style={{paddingTop:22}}>
+              <Toggle checked={form.evidence_verify_ssl!==false}
+                onChange={f("evidence_verify_ssl")} label="Verificar certificado SSL"/>
+            </div>
+          </div>
+
+          <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:7,padding:"14px 16px",marginBottom:18}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#c8d4e8",marginBottom:12}}>Prueba de snapshot</div>
+            <div style={{marginBottom:18}}>
+              <label style={cfgStyles.label}>Carril AVC para prueba</label>
+              {evidenceLanes.length ? (
+                <select value={evidenceLane} onChange={e=>setEvidenceLane(e.target.value)} style={cfgStyles.select}>
+                  {evidenceLanes.map(item=>(
+                    <option key={item.lane_name} value={item.lane_name}>
+                      {item.lane_name}{item.sat_lane?` → ${item.sat_lane}`:""} · {item.device_id}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div style={{fontSize:11,color:"#ff7e3f",padding:"9px 10px",border:"1px solid rgba(255,126,63,0.25)",borderRadius:6}}>
+                  {source.id
+                    ? "Esta fuente todavía no tiene carriles con UUID sincronizados."
+                    : "Guarda y sincroniza primero la fuente para descubrir sus carriles y UUID."}
+                </div>
+              )}
+            </div>
+            <FormField label="Timestamp Unix" value={testTimestamp} onChange={setTestTimestamp}
+              placeholder="Segundos o milisegundos"/>
+            {selectedTimestampLabel && (
+              <div style={{fontSize:11,color:"#5b9cf6",marginTop:-12,marginBottom:14}}>
+                {selectedTimestampLabel} · America/Mexico_City
+              </div>
+            )}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+              {[
+                {label:"Hace 20 segundos",seconds:20},
+                {label:"Hace 30 minutos",seconds:30*60},
+                {label:"Hace 1 hora",seconds:60*60},
+                {label:"Hace 3 horas",seconds:3*60*60},
+              ].map(option=>(
+                <button key={option.seconds} onClick={()=>setRelativeTimestamp(option.seconds)}
+                  style={{...cfgStyles.actionBtn,padding:"6px 10px"}}>
+                  {option.label}
+                </button>
+              ))}
+              <button onClick={testEvidence} disabled={testingEvidence||!evidenceLane}
+                style={{...cfgStyles.actionBtn,marginLeft:"auto",padding:"6px 12px",color:"#5b9cf6",borderColor:"rgba(91,156,246,0.4)",opacity:testingEvidence?0.65:1}}>
+                {testingEvidence?"Solicitando…":"Probar snapshot"}
+              </button>
+            </div>
+            {evidenceMessage && (
+              <div style={{fontSize:11,color:evidenceSuccess?"#22c97b":"#ff4c6a",marginBottom:evidenceResult?12:0}}>
+                {evidenceMessage}
+              </div>
+            )}
+            {evidenceResult && (
+              <div>
+                {evidenceRequest && (
+                  <div style={{background:"#101a2d",border:"1px solid rgba(91,156,246,0.35)",borderRadius:7,padding:"12px 14px",marginBottom:10}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#7f91af",textTransform:"uppercase",marginBottom:5}}>
+                      Hora esperada en el OSD de la cámara
+                    </div>
+                    <div style={{fontSize:24,fontWeight:800,color:"#f3f7ff",lineHeight:1.1}}>
+                      {timeOnlyLabel(evidenceRequest.timestamp)}
+                    </div>
+                    <div style={{fontSize:12,color:"#9db4d8",marginTop:5}}>
+                      {timestampLabel(evidenceRequest.timestamp)} · America/Mexico_City
+                    </div>
+                    <div style={{fontSize:10,color:"#667998",marginTop:7,fontFamily:"monospace",wordBreak:"break-all"}}>
+                      Unix enviado: {evidenceRequest.timestamp}
+                      {evidenceResult.unix_timestamp!=null?` · Alice confirmó: ${evidenceResult.unix_timestamp}`:""}
+                    </div>
+                  </div>
+                )}
+                {evidenceResult.preview_data_url && (
+                  <div style={{position:"relative",background:"#050914",border:"1px solid #1e2535",borderRadius:6,overflow:"hidden",marginBottom:10}}>
+                    <img src={evidenceResult.preview_data_url} alt="Snapshot AVC"
+                      style={{display:"block",width:"100%",maxHeight:320,objectFit:"contain"}}/>
+                    <div style={{position:"absolute",left:8,bottom:8,background:"rgba(5,9,20,0.88)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:5,padding:"6px 9px",color:"#fff",fontSize:12,fontWeight:800}}>
+                      Solicitado: {timeOnlyLabel(evidenceRequest&&evidenceRequest.timestamp)}
+                    </div>
+                  </div>
+                )}
+                {evidenceResult.preview_data_url && evidenceRequest && (
+                  <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:10,alignItems:"end",marginBottom:10}}>
+                    <div>
+                      <label style={cfgStyles.label}>Hora visible en la esquina de la foto</label>
+                      <input value={observedCameraTime} onChange={e=>setObservedCameraTime(e.target.value)}
+                        placeholder="HH:MM:SS" maxLength={8}
+                        style={{...cfgStyles.input,fontFamily:"monospace",fontSize:14}}/>
+                    </div>
+                    <div style={{
+                      minWidth:105,padding:"9px 10px",borderRadius:6,textAlign:"center",
+                      background:observedDrift==null?"#121b2d":Math.abs(observedDrift)<=1?"rgba(34,201,123,0.12)":"rgba(255,76,106,0.12)",
+                      border:`1px solid ${observedDrift==null?"#26334a":Math.abs(observedDrift)<=1?"rgba(34,201,123,0.4)":"rgba(255,76,106,0.4)"}`,
+                    }}>
+                      <div style={{fontSize:9,color:"#7788a6",textTransform:"uppercase"}}>Desfase OSD</div>
+                      <div style={{fontSize:18,fontWeight:800,color:observedDrift==null?"#8a9ab5":Math.abs(observedDrift)<=1?"#22c97b":"#ff4c6a"}}>
+                        {observedDrift==null?"—":`${observedDrift>0?"+":""}${observedDrift}s`}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div style={{fontSize:11,color:"#8a9ab5",lineHeight:1.6}}>
+                  {evidenceResult.camera_name||"Cámara sin nombre"} · Foto {evidenceResult.photo_available?"disponible":"no disponible"}
+                  {evidenceResult.expires_in_seconds!=null?` · Expira en ${evidenceResult.expires_in_seconds}s`:""}
+                </div>
+                {evidenceResult.preview_error && <div style={{fontSize:11,color:"#ff7e3f",marginTop:5}}>{evidenceResult.preview_error}</div>}
+              </div>
+            )}
+          </div>
+        </div>
 
         <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:8}}>
           <button onClick={onClose} style={cfgStyles.actionBtn}>Cancelar</button>

@@ -791,74 +791,326 @@ def _report_rows_for_type(rows: List[Dict[str, Any]], report_type: str) -> List[
     return rows
 
 
+def _compute_report_hourly(date_from: str, date_to: str, lane_filter: list) -> List[Dict[str, Any]]:
+    try:
+        d_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+        d_to = datetime.strptime(date_to, "%Y-%m-%d").date()
+    except Exception:
+        return []
+    lane_set = set(lane_filter) if lane_filter else set()
+    hourly: Dict[int, Dict[str, int]] = {h: {"total":0,"matched":0,"avcOnly":0,"satOnly":0} for h in range(24)}
+    try:
+        with _db() as c:
+            db_rows = c.execute("SELECT cache_key, result_json FROM recon_cache ORDER BY cache_key").fetchall()
+        for r in db_rows:
+            parts = r["cache_key"].split("::", 2)
+            lane = parts[1] if len(parts) == 3 else (parts[0] if parts else "")
+            fecha = parts[2] if len(parts) == 3 else (parts[-1] if parts else "")
+            try:
+                row_date = datetime.strptime(fecha, "%Y-%m-%d").date()
+            except Exception:
+                continue
+            if row_date < d_from or row_date > d_to:
+                continue
+            if lane_set and lane not in lane_set:
+                continue
+            try:
+                events = json.loads(r["result_json"] or "[]")
+            except Exception:
+                continue
+            for ev in events:
+                tipo = ev.get("tipo", "")
+                ts_str = str(ev.get("event_mexico") or ev.get("avc_date") or ev.get("sat_date") or "")
+                if not ts_str or ts_str in ("None", "nan", ""):
+                    continue
+                try:
+                    hour = datetime.strptime(ts_str.replace("T", " ")[:19], "%Y-%m-%d %H:%M:%S").hour
+                except Exception:
+                    continue
+                hourly[hour]["total"] += 1
+                if tipo == "MATCH":
+                    hourly[hour]["matched"] += 1
+                elif tipo == "AVC":
+                    hourly[hour]["avcOnly"] += 1
+                elif tipo == "SAT":
+                    hourly[hour]["satOnly"] += 1
+    except Exception:
+        pass
+    return [{"hour": h, **hourly[h]} for h in range(24)]
+
+
 def _designed_report_html_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> bytes:
-    lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
-    rows = [
-        r for r in report.get("rows", [])
-        if not lanes or r.get("lane") in lanes
-    ]
-    rows = _report_rows_for_type(rows, form.get("type") or "")
-    totals = {
-        "total": sum(int(r.get("total") or 0) for r in rows),
-        "matched": sum(int(r.get("matched") or 0) for r in rows),
-        "avcOnly": sum(int(r.get("avcOnly") or 0) for r in rows),
-        "satOnly": sum(int(r.get("satOnly") or 0) for r in rows),
-        "axleErr": sum(int(r.get("axleErr") or 0) for r in rows),
-        "classMismatch": sum(int(r.get("classMismatch") or 0) for r in rows),
+    CLASS_NAMES_RPT = {
+        1:"Auto",2:"C2",3:"C3",4:"C4",5:"C5",6:"C6",7:"C7",
+        8:"C8",9:"C9+",10:"AR1",11:"AR2",12:"B2",13:"B3",14:"B4",15:"Moto",
     }
-    totals["discrepancy"] = totals["avcOnly"] + totals["satOnly"] + totals["axleErr"]
-    totals["matchRate"] = round((totals["total"] - totals["satOnly"]) / max(totals["total"], 1) * 100, 1)
-    max_total = max([int(r.get("total") or 0) for r in rows] or [1])
-    logo_data = ""
+    MOTIVE_LABELS = {
+        "SAT_no_detecto":"AVC sin SAT en ventana","clase_distinta":"Clase incompatible",
+        "error_conteo_avc":"Error conteo AVC","moto_detectada_solo_por_avc":"Moto solo AVC",
+        "AVC_no_detecto":"SAT sin AVC","moto_SAT_sin_AVC":"Moto SAT sin AVC",
+        "SAT_clase_indefinida":"SAT clase indefinida",
+    }
+    lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
+    rows = [r for r in report.get("rows", []) if not lanes or r.get("lane") in lanes]
+    rows = _report_rows_for_type(rows, form.get("type") or "")
+    totals = report.get("totals") or {}
+    if lanes:
+        t_tot = sum(int(r.get("total") or 0) for r in rows)
+        t_sat = sum(int(r.get("satOnly") or 0) for r in rows)
+        t_avc_o = sum(int(r.get("avcOnly") or 0) for r in rows)
+        totals = {
+            "total": t_tot,
+            "matched": sum(int(r.get("matched") or 0) for r in rows),
+            "avcOnly": t_avc_o, "satOnly": t_sat,
+            "classMismatch": sum(int(r.get("classMismatch") or 0) for r in rows),
+            "matchRate": round((t_tot - t_sat) / max(t_tot, 1) * 100, 1),
+            "discrepancyCount": t_avc_o + t_sat,
+            "discrepancyRate": round((t_avc_o + t_sat) / max(t_tot, 1) * 100, 1),
+            "sat_money": round(sum(float(r.get("sat_money") or 0) for r in rows), 2),
+            "avc_money": round(sum(float(r.get("avc_money") or 0) for r in rows), 2),
+            "money_delta": round(sum(float(r.get("avc_money") or 0) - float(r.get("sat_money") or 0) for r in rows), 2),
+        }
+    class_breakdown = report.get("class_breakdown") or []
+    motive_breakdown = report.get("motive_breakdown") or []
+    worst_rows = report.get("worst_rows") or []
+    hourly = _compute_report_hourly(
+        report.get("date_from") or date.today().isoformat(),
+        report.get("date_to") or date.today().isoformat(),
+        lanes,
+    )
+    max_hourly = max((h["total"] for h in hourly), default=1) or 1
+    logo_data = "/logo.jpeg"
     logo_path = os.path.join(BASE_DIR, "frontend", "logo.jpeg")
     try:
         with open(logo_path, "rb") as fh:
             logo_data = "data:image/jpeg;base64," + base64.b64encode(fh.read()).decode("ascii")
     except Exception:
-        logo_data = "/logo.jpeg"
+        pass
 
     def n(value: Any) -> str:
-        try:
-            return f"{int(value):,}"
-        except Exception:
-            return str(value or 0)
+        try: return f"{int(float(value or 0)):,}"
+        except Exception: return str(value or 0)
 
-    chart_rows = []
-    for r in rows[:12]:
-        total = max(int(r.get("total") or 0), 1)
-        row_width = max(8, round(int(r.get("total") or 0) / max(max_total, 1) * 100))
-        def seg(key: str) -> int:
-            value = int(r.get(key) or 0)
-            return max(4 if value else 0, round(value / total * 100))
-        chart_rows.append(
-            f"""<div class="bar-row">
-              <div class="bar-label"><strong>{_html_escape(r.get('lane'))}</strong><span>{_html_escape(r.get('date'))}</span></div>
-              <div class="bar-shell" style="width:{row_width}%">
-                <div class="seg matched" style="width:{seg('matched')}%"></div>
-                <div class="seg avc" style="width:{seg('avcOnly')}%"></div>
-                <div class="seg sat" style="width:{seg('satOnly')}%"></div>
-                <div class="seg axle" style="width:{seg('axleErr')}%"></div>
-              </div>
-              <strong>{n(r.get('total'))}</strong>
-            </div>"""
+    def money(value: Any) -> str:
+        try: return f"${float(value or 0):,.2f}"
+        except Exception: return "$0.00"
+
+    def pct(value: Any) -> str:
+        try: return f"{float(value or 0):.1f}%"
+        except Exception: return "0.0%"
+
+    def rate_color(rate: Any) -> str:
+        try:
+            v = float(rate or 0)
+            return "#14965a" if v >= 97 else "#b88900" if v >= 93 else "#d92d53"
+        except Exception:
+            return "#475569"
+
+    max_total = max([int(r.get("total") or 0) for r in rows[:14]] or [1])
+    bar_rows_html = ""
+    for r in rows[:14]:
+        row_total = max(int(r.get("total") or 0), 1)
+        row_w = max(8, round(int(r.get("total") or 0) / max(max_total, 1) * 100))
+        def _seg(key: str, t: int = row_total) -> int:
+            v = int(r.get(key) or 0)
+            return max(4 if v else 0, round(v / t * 100))
+        bar_rows_html += (
+            f'<div class="bar-row">'
+            f'<div class="bar-label"><strong>{_html_escape(r.get("lane",""))}</strong>'
+            f'<span>{_html_escape(r.get("date",""))}</span></div>'
+            f'<div class="bar-shell" style="width:{row_w}%">'
+            f'<div class="seg matched" style="width:{_seg("matched")}%"></div>'
+            f'<div class="seg avc" style="width:{_seg("avcOnly")}%"></div>'
+            f'<div class="seg sat" style="width:{_seg("satOnly")}%"></div>'
+            f'</div>'
+            f'<div class="bar-end"><strong>{n(r.get("total"))}</strong>'
+            f'<span style="color:{rate_color(r.get("matchRate"))}">{pct(r.get("matchRate"))}</span></div>'
+            f'</div>'
         )
-    table_rows = "\n".join(
-        f"""<tr><td>{_html_escape(r.get('date'))}</td><td>{_html_escape(r.get('lane'))}</td><td>{n(r.get('total'))}</td>
-        <td>{n(r.get('matched'))}</td><td>{n(r.get('avcOnly'))}</td><td>{n(r.get('satOnly'))}</td>
-        <td>{n(r.get('axleErr'))}</td><td>{_html_escape(r.get('discrepancyRate') or 0)}%</td></tr>"""
-        for r in rows[:40]
+
+    active_hours = [h for h in hourly if h["total"] > 0]
+    h_start = min((h["hour"] for h in active_hours), default=6)
+    h_end   = max((h["hour"] for h in active_hours), default=22)
+    hourly_html = ""
+    for hb in hourly:
+        if hb["hour"] < h_start or hb["hour"] > h_end:
+            continue
+        bar_w = max(2, round(hb["total"] / max_hourly * 100))
+        t = max(hb["total"], 1)
+        w_m = round(hb["matched"] / t * bar_w)
+        w_a = round(hb["avcOnly"] / t * bar_w)
+        w_s = round(hb["satOnly"] / t * bar_w)
+        hourly_html += (
+            f'<div class="h-row">'
+            f'<div class="h-label">{hb["hour"]:02d}h</div>'
+            f'<div class="h-shell">'
+            f'<div class="h-seg h-matched" style="width:{w_m}%"></div>'
+            f'<div class="h-seg h-avc" style="width:{w_a}%"></div>'
+            f'<div class="h-seg h-sat" style="width:{w_s}%"></div>'
+            f'</div><div class="h-count">{n(hb["total"])}</div></div>'
+        )
+    if not hourly_html:
+        hourly_html = '<p style="color:#64748b;font-size:11px;">Sin datos de flujo horario</p>'
+
+    motives_html = "".join(
+        f'<div class="motive-row"><span>{_html_escape(MOTIVE_LABELS.get(m.get("motivo",""), m.get("motivo","")))}</span>'
+        f'<strong>{n(m.get("count"))}</strong></div>'
+        for m in motive_breakdown[:8]
+    ) or '<p style="color:#64748b;font-size:11px;">Sin discrepancias registradas</p>'
+
+    worst_html = "".join(
+        f'<tr><td>{_html_escape(r.get("date",""))}</td>'
+        f'<td style="color:#2f5fb7;font-weight:600">{_html_escape(r.get("lane",""))}</td>'
+        f'<td style="color:#d92d53;font-weight:700">{pct(r.get("discrepancyRate"))}</td>'
+        f'<td>{n(r.get("discrepancyCount"))} casos</td></tr>'
+        for r in worst_rows[:6]
+    ) or '<tr><td colspan="4" style="color:#64748b;">Sin datos</td></tr>'
+
+    money_delta_val = float(totals.get("money_delta") or 0)
+    money_delta_color = "#d92d53" if money_delta_val > 0 else "#14965a"
+    class_rows_html = ""
+    for cb in class_breakdown:
+        cls_id = cb.get("class_id", "")
+        try: cls_name = CLASS_NAMES_RPT.get(int(float(cls_id)), f"Cls {cls_id}")
+        except Exception: cls_name = f"Cls {cls_id}"
+        delta = int(cb.get("delta") or 0)
+        mdelta = float(cb.get("money_delta") or 0)
+        dc = "#14965a" if delta > 0 else "#d92d53" if delta < 0 else "#475569"
+        mc = "#d92d53" if mdelta > 500 else "#b88900" if mdelta < -500 else "#475569"
+        class_rows_html += (
+            f'<tr><td style="color:#2f5fb7;font-weight:600">C{cls_id}–{_html_escape(cls_name)}</td>'
+            f'<td>{n(cb.get("avc"))}</td><td>{n(cb.get("sat"))}</td>'
+            f'<td style="color:{dc};font-weight:{"700" if delta else "400"}">{("+" if delta>0 else "")}{delta}</td>'
+            f'<td style="color:#1d4ed8">{money(cb.get("sat_money"))}</td>'
+            f'<td style="color:#c2410c">{money(cb.get("avc_money"))}</td>'
+            f'<td style="color:{mc}">{("+" if mdelta>=0 else "")}{money(mdelta)}</td></tr>'
+        )
+    class_rows_html += (
+        f'<tr style="background:#f1f5f9;font-weight:700;border-top:2px solid #cbd5e1">'
+        f'<td>TOTAL</td>'
+        f'<td>{n(sum(cb.get("avc",0) for cb in class_breakdown))}</td>'
+        f'<td>{n(sum(cb.get("sat",0) for cb in class_breakdown))}</td><td></td>'
+        f'<td style="color:#1d4ed8">{money(totals.get("sat_money"))}</td>'
+        f'<td style="color:#c2410c">{money(totals.get("avc_money"))}</td>'
+        f'<td style="color:{money_delta_color};font-weight:700">'
+        f'{("+" if money_delta_val>=0 else "")}{money(money_delta_val)}</td></tr>'
     )
-    html = f"""<!doctype html><html><head><meta charset="utf-8"/><title>{_html_escape(form.get('name') or form.get('type') or 'AG-metrics Report')}</title>
-<style>
-*{{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}body{{font-family:Arial,Helvetica,sans-serif;color:#111827;margin:0;background:#f3f6fb}}.page{{max-width:1080px;margin:0 auto;background:#fff;min-height:100vh;padding:30px 34px 36px}}.header{{display:grid;grid-template-columns:170px 1fr auto;gap:22px;align-items:center;border-bottom:3px solid #111827;padding-bottom:20px}}.logo-box{{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff;display:flex;align-items:center;justify-content:center;min-height:86px}}.logo{{max-width:138px;max-height:64px;object-fit:contain}}.brand{{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:#64748b;font-weight:700}}h1{{margin:5px 0 6px;font-size:25px}}.meta{{color:#64748b;font-size:12px;line-height:1.55}}.badge{{display:inline-block;background:#eaf1ff;color:#2f5fb7;border:1px solid #c7d8ff;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700}}.kpis{{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0}}.kpi{{border:1px solid #dbe3ef;border-radius:10px;padding:12px;background:#fff}}.kpi span{{display:block;color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px}}.kpi strong{{display:block;font-size:22px;margin-top:5px}}.good strong{{color:#14965a}}.warn strong{{color:#b88900}}.bad strong{{color:#d92d53}}.info strong{{color:#2f5fb7}}.summary{{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin:18px 0}}.summary-card{{border:1px solid #dbe3ef;border-radius:10px;padding:13px 15px;background:#fbfdff}}.summary-card h2{{font-size:13px;margin:0 0 8px}}.summary-card p{{margin:4px 0;color:#475569;font-size:12px}}.section{{margin-top:24px;border:1px solid #dbe3ef;border-radius:10px;padding:16px;background:#fff}}.section h2{{font-size:15px;margin:0 0 12px}}.legend{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:11px;color:#475569}}.dot{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}}.matched-dot{{background:#22c97b}}.avc-dot{{background:#ff7e3f}}.sat-dot{{background:#5b9cf6}}.axle-dot{{background:#f5d433}}.bar-row{{display:grid;grid-template-columns:145px 1fr 58px;gap:10px;align-items:center;margin:10px 0;font-size:11px}}.bar-label strong{{display:block}}.bar-label span{{display:block;color:#64748b;margin-top:2px}}.bar-shell{{height:18px;background:#eef2f7;border-radius:999px;overflow:hidden;display:flex;min-width:32px}}.seg{{height:18px}}.matched{{background:#22c97b}}.avc{{background:#ff7e3f}}.sat{{background:#5b9cf6}}.axle{{background:#f5d433}}table{{width:100%;border-collapse:separate;border-spacing:0;margin-top:10px;font-size:11px;border:1px solid #dbe3ef;border-radius:8px}}th,td{{padding:8px 9px;text-align:left;border-bottom:1px solid #e5eaf2}}th{{background:#f1f5f9;color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:.45px}}.footer{{display:flex;justify-content:space-between;margin-top:24px;color:#64748b;font-size:10px;border-top:1px solid #dbe3ef;padding-top:12px}}@page{{margin:12mm}}@media print{{body{{background:#fff}}.page{{padding:18px;max-width:none}}.section,.kpis{{break-inside:avoid}}}}
-</style></head><body><div class="page">
-<div class="header"><div class="logo-box"><img class="logo" src="{logo_data}" alt="AG Holdings"/></div><div><div class="brand">AG-metrics Toll Audit Platform</div><h1>{_html_escape(form.get('name') or form.get('type') or 'AG-metrics Report')}</h1><div class="meta">{_html_escape(form.get('plaza') or '')} · {_html_escape(form.get('type') or '')}<br/>{_html_escape(report.get('date_from'))} to {_html_escape(report.get('date_to'))} · Generated {_html_escape(_now())}</div></div><div><span class="badge">{_html_escape(form.get('template') or 'Standard PDF')}</span></div></div>
-<div class="kpis"><div class="kpi info"><span>Total events</span><strong>{n(totals['total'])}</strong></div><div class="kpi good"><span>Matched</span><strong>{n(totals['matched'])}</strong></div><div class="kpi bad"><span>Discrepancies</span><strong>{n(totals['discrepancy'])}</strong></div><div class="kpi info"><span>Detection rate</span><strong>{totals['matchRate']}%</strong></div><div class="kpi warn"><span>Axle errors</span><strong>{n(totals['axleErr'])}</strong></div><div class="kpi bad"><span>Class mismatch</span><strong>{n(totals['classMismatch'])}</strong></div></div>
-<div class="summary"><div class="summary-card"><h2>Report scope</h2><p><strong>Lanes:</strong> {_html_escape(', '.join(lanes) if lanes else 'All available lanes')}</p><p><strong>Frequency:</strong> {_html_escape(form.get('frequency') or 'Manual only')}</p><p><strong>Recipients:</strong> {_html_escape(', '.join(form.get('recipients') or []) or form.get('contact_group') or 'Not configured')}</p></div><div class="summary-card"><h2>Included sections</h2><p>KPI indicators</p><p>Lane/day discrepancy chart</p><p>Detail table with reconciliation totals</p></div></div>
-<div class="section"><h2>Results by lane and day</h2><div class="legend"><span><i class="dot matched-dot"></i>Matched</span><span><i class="dot avc-dot"></i>AVC only</span><span><i class="dot sat-dot"></i>SAT only</span><span><i class="dot axle-dot"></i>Axle errors</span></div>{''.join(chart_rows) or '<p class="meta">No data available</p>'}</div>
-<div class="section"><h2>Detail table</h2><table><thead><tr><th>Date</th><th>Lane</th><th>Total</th><th>Matched</th><th>AVC only</th><th>SAT only</th><th>Axle errors</th><th>Discrepancy rate</th></tr></thead><tbody>{table_rows}</tbody></table></div>
-<div class="footer"><span>AG-metrics · AVC/SAT Audit Report</span><span>{_html_escape(form.get('template') or 'Standard PDF')}</span></div></div></body></html>"""
+
+    table_rows = "\n".join(
+        f'<tr>'
+        f'<td style="font-family:monospace;color:#64748b">{_html_escape(r.get("date",""))}</td>'
+        f'<td style="color:#2f5fb7;font-weight:600">{_html_escape(r.get("lane",""))}</td>'
+        f'<td>{n(r.get("total"))}</td>'
+        f'<td style="color:#14965a">{n(r.get("matched"))}</td>'
+        f'<td style="color:{"#c2410c" if int(r.get("avcOnly") or 0)>0 else "#64748b"}">{n(r.get("avcOnly"))}</td>'
+        f'<td style="color:{"#1d4ed8" if int(r.get("satOnly") or 0)>0 else "#64748b"}">{n(r.get("satOnly"))}</td>'
+        f'<td style="color:{rate_color(r.get("matchRate"))};font-weight:700">{pct(r.get("matchRate"))}</td>'
+        f'<td style="color:{"#d92d53" if float(r.get("discrepancyRate") or 0)>5 else "#64748b"}">{pct(r.get("discrepancyRate"))}</td>'
+        f'<td style="color:#1d4ed8">{money(r.get("sat_money"))}</td>'
+        f'<td style="color:#c2410c">{money(r.get("avc_money"))}</td>'
+        f'</tr>'
+        for r in rows[:50]
+    )
+
+    css = (
+        "*{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}"
+        "body{font-family:Arial,Helvetica,sans-serif;color:#111827;margin:0;background:#f3f6fb;font-size:12px}"
+        ".page{max-width:1100px;margin:0 auto;background:#fff;min-height:100vh;padding:28px 32px 36px}"
+        ".header{display:grid;grid-template-columns:130px 1fr auto;gap:18px;align-items:center;border-bottom:3px solid #111827;padding-bottom:16px;margin-bottom:16px}"
+        ".logo-box{border:1px solid #dbe3ef;border-radius:8px;padding:8px;background:#fff;display:flex;align-items:center;justify-content:center;min-height:64px}"
+        ".logo{max-width:110px;max-height:50px;object-fit:contain}"
+        ".brand{font-size:9px;text-transform:uppercase;letter-spacing:1.2px;color:#64748b;font-weight:700}"
+        "h1{margin:3px 0 4px;font-size:20px;line-height:1.2}"
+        ".meta{color:#64748b;font-size:10px;line-height:1.5}"
+        ".badge{display:inline-block;background:#eaf1ff;color:#2f5fb7;border:1px solid #c7d8ff;border-radius:999px;padding:3px 8px;font-size:9px;font-weight:700}"
+        ".kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:8px}"
+        ".kpis-money{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}"
+        ".kpi{border:1px solid #dbe3ef;border-radius:7px;padding:9px 11px;background:#fff}"
+        ".kpi span{display:block;color:#64748b;font-size:8px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}"
+        ".kpi strong{display:block;font-size:17px;font-weight:700}"
+        ".two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}"
+        ".section{margin-bottom:14px;border:1px solid #dbe3ef;border-radius:7px;padding:12px 14px;background:#fff;break-inside:avoid}"
+        ".section h2{font-size:12px;font-weight:700;margin:0 0 10px;color:#111827}"
+        ".legend{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;font-size:9px;color:#475569}"
+        ".dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:3px;vertical-align:middle}"
+        ".bar-row{display:grid;grid-template-columns:120px 1fr 70px;gap:6px;align-items:center;margin:5px 0;font-size:9px}"
+        ".bar-label strong{display:block;color:#111827;font-size:9px}"
+        ".bar-label span{display:block;color:#64748b;font-size:8px}"
+        ".bar-shell{height:13px;background:#eef2f7;border-radius:999px;overflow:hidden;display:flex;min-width:20px}"
+        ".seg{height:13px}.matched{background:#22c97b}.avc{background:#ff7e3f}.sat{background:#5b9cf6}"
+        ".bar-end{text-align:right}.bar-end strong{font-size:10px}.bar-end span{display:block;font-size:8px}"
+        ".h-row{display:grid;grid-template-columns:30px 1fr 36px;gap:4px;align-items:center;margin:2px 0;font-size:8px}"
+        ".h-label{color:#64748b;text-align:right}"
+        ".h-shell{height:10px;background:#eef2f7;border-radius:999px;overflow:hidden;display:flex}"
+        ".h-seg{height:10px}.h-matched{background:#22c97b}.h-avc{background:#ff7e3f}.h-sat{background:#5b9cf6}"
+        ".h-count{text-align:right;color:#475569;font-size:8px}"
+        ".motive-row{display:flex;justify-content:space-between;background:#f8fafc;border:1px solid #e2e8f0;border-radius:4px;padding:5px 8px;margin:3px 0;font-size:10px}"
+        ".motive-row strong{color:#c2410c;font-weight:700}"
+        "table{width:100%;border-collapse:collapse;font-size:9px}"
+        "th{background:#f1f5f9;color:#475569;font-size:8px;text-transform:uppercase;letter-spacing:.4px;padding:6px 7px;text-align:left;border-bottom:2px solid #e2e8f0}"
+        "td{padding:5px 7px;border-bottom:1px solid #e5eaf2;vertical-align:middle}"
+        "tr:last-child td{border-bottom:0}"
+        ".footer{display:flex;justify-content:space-between;margin-top:16px;color:#64748b;font-size:8px;border-top:1px solid #dbe3ef;padding-top:8px}"
+        "@page{margin:9mm}@media print{body{background:#fff}.page{padding:12px;max-width:none}.section{break-inside:avoid}}"
+    )
+
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8"/>
+<title>{_html_escape(form.get('name') or form.get('type') or 'AG-metrics Report')}</title>
+<style>{css}</style></head>
+<body><div class="page">
+<div class="header">
+  <div class="logo-box"><img class="logo" src="{logo_data}" alt="AG-metrics"/></div>
+  <div>
+    <div class="brand">AG-metrics · Plataforma de Auditoría AVC/SAT</div>
+    <h1>{_html_escape(form.get('name') or form.get('type') or 'Reporte de Auditoría')}</h1>
+    <div class="meta">{_html_escape(form.get('plaza') or '')} &nbsp;·&nbsp; {_html_escape(report.get('date_from',''))} al {_html_escape(report.get('date_to',''))}<br/>
+    Carriles: {_html_escape(', '.join(lanes) if lanes else 'Todos los disponibles')} &nbsp;·&nbsp; Generado: {_html_escape(_now())}</div>
+  </div>
+  <div><span class="badge">{_html_escape(form.get('template') or 'Standard PDF')}</span></div>
+</div>
+<div class="kpis">
+  <div class="kpi"><span>Total eventos</span><strong style="color:#111827">{n(totals.get('total'))}</strong></div>
+  <div class="kpi"><span>Coincidencias</span><strong style="color:#14965a">{n(totals.get('matched'))}</strong></div>
+  <div class="kpi"><span>AVC sin SAT</span><strong style="color:#c2410c">{n(totals.get('avcOnly'))}</strong></div>
+  <div class="kpi"><span>SAT sin AVC</span><strong style="color:#1d4ed8">{n(totals.get('satOnly'))}</strong></div>
+  <div class="kpi"><span>Tasa detección</span><strong style="color:{rate_color(totals.get('matchRate'))}">{pct(totals.get('matchRate'))}</strong></div>
+</div>
+<div class="kpis-money">
+  <div class="kpi" style="border-color:#bfdbfe"><span>SAT Facturado (real)</span><strong style="color:#1d4ed8">{money(totals.get('sat_money'))}</strong></div>
+  <div class="kpi" style="border-color:#fed7aa"><span>AVC Estimado (tarifas config.)</span><strong style="color:#c2410c">{money(totals.get('avc_money'))}</strong></div>
+  <div class="kpi" style="border-color:{'#fecaca' if money_delta_val>0 else '#bbf7d0'}"><span>Delta AVC − SAT</span><strong style="color:{money_delta_color}">{("+" if money_delta_val>=0 else "")}{money(money_delta_val)}</strong></div>
+</div>
+<div class="two-col">
+  <div class="section"><h2>Detección por carril / día</h2>
+    <div class="legend"><span><i class="dot" style="background:#22c97b"></i>Coincidencia</span><span><i class="dot" style="background:#ff7e3f"></i>Solo AVC</span><span><i class="dot" style="background:#5b9cf6"></i>Solo SAT</span></div>
+    {bar_rows_html or '<p style="color:#64748b;font-size:10px;">Sin datos</p>'}
+  </div>
+  <div class="section"><h2>Flujo de eventos por hora</h2>
+    <div class="legend"><span><i class="dot" style="background:#22c97b"></i>Match</span><span><i class="dot" style="background:#ff7e3f"></i>AVC</span><span><i class="dot" style="background:#5b9cf6"></i>SAT</span></div>
+    {hourly_html}
+  </div>
+</div>
+<div class="two-col">
+  <div class="section"><h2>Motivos de discrepancia</h2>{motives_html}</div>
+  <div class="section"><h2>Carriles con mayor discrepancia</h2><table><tbody>{worst_html}</tbody></table></div>
+</div>
+<div class="section"><h2>Comparativa por clase — AVC vs SAT</h2>
+  <table><thead><tr><th>Clase</th><th>AVC det.</th><th>SAT trans.</th><th>Delta</th><th>SAT Facturado</th><th>AVC Estimado</th><th>Delta ($)</th></tr></thead>
+  <tbody>{class_rows_html}</tbody></table>
+</div>
+<div class="section"><h2>Resumen por día y carril</h2>
+  <table><thead><tr><th>Fecha</th><th>Carril</th><th>Total</th><th>Coincidencias</th><th>AVC sin SAT</th><th>SAT sin AVC</th><th>Detección</th><th>% Disc.</th><th>SAT $</th><th>AVC $</th></tr></thead>
+  <tbody>{table_rows}</tbody></table>
+</div>
+<div class="footer">
+  <span>AG-metrics · Reporte de Auditoría AVC/SAT</span>
+  <span>{_html_escape(form.get('template') or 'Standard PDF')} · {_html_escape(report.get('date_from',''))} – {_html_escape(report.get('date_to',''))}</span>
+</div>
+</div></body></html>"""
     return html.encode("utf-8")
+
+
 
 
 def _pdf_escape(value: Any) -> str:
@@ -1258,6 +1510,218 @@ async def sync_source(sid: int, request: Request, user=Depends(_get_user)):
         return {"ok": True, "records": len(df), "date": fecha_str}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# ─────────────────────────────────────────────────────────
+# Integración AVC — prueba de evidencia por fuente
+# ─────────────────────────────────────────────────────────
+
+def _source_evidence_config(source_id: int) -> Dict[str, Any]:
+    with _db() as c:
+        row = c.execute("SELECT config FROM avc_sources WHERE id=?", (source_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Fuente AVC no encontrada")
+    return json.loads(row["config"] or "{}")
+
+
+def _lane_device_id(source_id: int, lane_name: str) -> str:
+    with _db() as c:
+        rows = c.execute(
+            """SELECT extra_json FROM avc_local_events
+               WHERE source_id=? AND lane_name=?
+               ORDER BY event_date DESC,event_timestamp DESC LIMIT 50""",
+            (source_id, lane_name),
+        ).fetchall()
+    for row in rows:
+        try:
+            extra = json.loads(row["extra_json"] or "{}")
+        except Exception:
+            continue
+        device_id = str(extra.get("device_id") or extra.get("deviceId") or "").strip()
+        if device_id:
+            return device_id
+    raise HTTPException(404, f"No hay device_id sincronizado para el carril AVC '{lane_name}'")
+
+
+def _snapshot_unix_value(value: str, timezone_name: str) -> str:
+    raw = str(value or "").strip()
+    if re.fullmatch(r"\d{10,13}", raw):
+        return raw
+    parsed = parse_date(raw)
+    if pd.isna(parsed):
+        raise HTTPException(400, "Timestamp SAT inválido")
+    dt = parsed.to_pydatetime() if isinstance(parsed, pd.Timestamp) else parsed
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=get_event_tz(timezone_name))
+    return str(int(dt.timestamp() * 1000))
+
+
+def _request_alice_snapshot(config: Dict[str, Any], device_id: str, timestamp: str) -> Dict[str, Any]:
+    base_url = str(config.get("evidence_base_url") or "").strip().rstrip("/")
+    client_id = str(config.get("evidence_client_id") or "").strip()
+    api_key = str(config.get("evidence_api_key") or "")
+    timeout = max(1, min(int(config.get("evidence_timeout_seconds") or 20), 120))
+    verify_ssl = bool(config.get("evidence_verify_ssl", True))
+    missing = [
+        label for label, value in (
+            ("URL base", base_url),
+            ("Client ID", client_id),
+            ("API key", api_key),
+            ("Device ID", device_id),
+            ("Timestamp", timestamp),
+        ) if not value
+    ]
+    if missing:
+        raise HTTPException(400, f"Faltan campos: {', '.join(missing)}")
+
+    try:
+        response = _requests.get(
+            f"{base_url}/api/v1/integration/snapshot",
+            params={"device_id": device_id, "timestamp": timestamp},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Client-ID": client_id,
+                "Accept": "application/json",
+            },
+            timeout=timeout,
+            verify=verify_ssl,
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo conectar con Alice Guardian: {exc}")
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    if response.status_code >= 400:
+        detail = payload.get("message") or payload.get("error") or response.text[:300]
+        raise HTTPException(502, f"Alice Guardian respondió HTTP {response.status_code}: {detail}")
+    return {
+        "payload": payload,
+        "evidence": payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {},
+        "timeout": timeout,
+        "verify_ssl": verify_ssl,
+    }
+
+
+@app.get("/api/avc-source-evidence/lanes")
+def get_source_evidence_lanes(source_id: int, user=Depends(_require_admin)):
+    cfg = load_saved_settings()
+    try:
+        lane_mapping = json.loads(cfg.get("lane_mapping") or "{}")
+    except Exception:
+        lane_mapping = {}
+    with _db() as c:
+        rows = c.execute(
+            """SELECT lane_name,extra_json FROM avc_local_events
+               WHERE source_id=? AND lane_name!=''
+               ORDER BY event_date DESC,event_timestamp DESC""",
+            (source_id,),
+        ).fetchall()
+    lanes: Dict[str, str] = {}
+    for row in rows:
+        lane_name = str(row["lane_name"] or "")
+        if not lane_name or lane_name in lanes:
+            continue
+        try:
+            extra = json.loads(row["extra_json"] or "{}")
+        except Exception:
+            extra = {}
+        device_id = str(extra.get("device_id") or extra.get("deviceId") or "").strip()
+        if device_id:
+            lanes[lane_name] = device_id
+    return {
+        "lanes": [
+            {"lane_name": lane, "device_id": device_id, "sat_lane": lane_mapping.get(lane, "")}
+            for lane, device_id in sorted(lanes.items())
+        ]
+    }
+
+
+@app.post("/api/avc-source-evidence/test")
+async def test_source_evidence(request: Request, user=Depends(_require_admin)):
+    body = await request.json()
+    config = body.get("config") if isinstance(body.get("config"), dict) else {}
+    source_id = body.get("source_id")
+    if source_id:
+        with _db() as c:
+            row = c.execute("SELECT config FROM avc_sources WHERE id=?", (int(source_id),)).fetchone()
+        if row:
+            saved_config = json.loads(row["config"] or "{}")
+            saved_config.update({k: v for k, v in config.items() if v not in ("", None)})
+            config = saved_config
+
+    lane_name = str(body.get("lane_name") or "").strip()
+    device_id = _lane_device_id(int(source_id), lane_name) if source_id and lane_name else ""
+    timestamp = str(body.get("timestamp") or "").strip()
+    if not re.fullmatch(r"\d{10,13}", timestamp):
+        raise HTTPException(400, "Timestamp debe ser Unix en segundos o milisegundos")
+    snapshot = _request_alice_snapshot(config, device_id, timestamp)
+    payload = snapshot["payload"]
+    evidence = snapshot["evidence"]
+    preview_data_url = ""
+    preview_error = ""
+    photo_url = str(evidence.get("photo_url") or "")
+    if evidence.get("photo_available") and photo_url:
+        try:
+            photo_response = _requests.get(
+                photo_url, timeout=snapshot["timeout"], verify=snapshot["verify_ssl"]
+            )
+            photo_response.raise_for_status()
+            if len(photo_response.content) > 12 * 1024 * 1024:
+                preview_error = "La foto excede el límite de vista previa de 12 MB"
+            else:
+                mime = photo_response.headers.get("Content-Type", "image/jpeg").split(";")[0]
+                preview_data_url = (
+                    f"data:{mime};base64,"
+                    + base64.b64encode(photo_response.content).decode("ascii")
+                )
+        except Exception as exc:
+            preview_error = f"Snapshot generado, pero no se pudo descargar la foto: {exc}"
+
+    return {
+        "ok": True,
+        "device_id": payload.get("device_id") or device_id,
+        "unix_timestamp": payload.get("unix_timestamp"),
+        "camera_name": payload.get("camera_name") or "",
+        "photo_available": bool(evidence.get("photo_available")),
+        "video_available": bool(evidence.get("video_available")),
+        "expires_in_seconds": evidence.get("expires_in_seconds"),
+        "preview_data_url": preview_data_url,
+        "preview_error": preview_error,
+    }
+
+
+@app.get("/api/sat-evidence/photo")
+def get_sat_evidence_photo(source_id: int, avc_lane: str, sat_timestamp: str,
+                           user=Depends(_get_user)):
+    config = _source_evidence_config(source_id)
+    device_id = _lane_device_id(source_id, avc_lane)
+    timestamp = _snapshot_unix_value(
+        sat_timestamp,
+        str(config.get("timezone") or load_saved_settings().get("timezone") or "America/Mexico_City"),
+    )
+    snapshot = _request_alice_snapshot(config, device_id, timestamp)
+    evidence = snapshot["evidence"]
+    photo_url = str(evidence.get("photo_url") or "")
+    if not evidence.get("photo_available") or not photo_url:
+        raise HTTPException(404, "Alice Guardian no encontró fotografía para esta transacción SAT")
+    try:
+        photo_response = _requests.get(
+            photo_url, timeout=snapshot["timeout"], verify=snapshot["verify_ssl"]
+        )
+        photo_response.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo descargar la fotografía temporal: {exc}")
+    mime = photo_response.headers.get("Content-Type", "image/jpeg").split(";")[0]
+    payload = snapshot["payload"]
+    return Response(
+        content=photo_response.content,
+        media_type=mime,
+        headers={
+            "X-Alice-Camera": str(payload.get("camera_name") or ""),
+            "X-Alice-Device-ID": device_id,
+        },
+    )
 
 
 # ─────────────────────────────────────────────────────────
@@ -1939,10 +2403,29 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
             "SELECT cache_key,result_json,summary_json,source_id,created_at FROM recon_cache ORDER BY cache_key"
         ).fetchall()
 
+    # Load AVC tariffs for monetary estimates
+    _cfg_money = _load_settings_with_source_fallback()
+    _raw_tariffs = _cfg_money.get("avc_tariffs") or {}
+    if isinstance(_raw_tariffs, str):
+        try:
+            _raw_tariffs = json.loads(_raw_tariffs)
+        except Exception:
+            _raw_tariffs = {}
+    _avc_tariffs_map: Dict[int, float] = {}
+    if isinstance(_raw_tariffs, dict):
+        for _k, _v in _raw_tariffs.items():
+            try:
+                _cls = int(float(_k)); _amt = float(str(_v).replace(",", "").strip())
+                if _cls > 0 and _amt > 0:
+                    _avc_tariffs_map[_cls] = _amt
+            except Exception:
+                pass
+
     report_rows: List[Dict[str, Any]] = []
-    totals = {"total":0, "matched":0, "avcOnly":0, "satOnly":0, "axleErr":0}
+    totals = {"total":0, "matched":0, "avcOnly":0, "satOnly":0, "axleErr":0,
+              "sat_money":0.0, "avc_money":0.0}
     discrepancy_totals: Dict[str, int] = {}
-    class_totals: Dict[str, Dict[str, int]] = {}
+    class_totals: Dict[str, Dict] = {}
     worst_rows: List[Dict[str, Any]] = []
 
     for r in rows:
@@ -1980,6 +2463,8 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
 
         motive_counts: Dict[str, int] = {}
         class_mismatch = 0
+        lane_sat_money = 0.0
+        lane_avc_money = 0.0
         for ev in events:
             tipo = ev.get("tipo", "")
             motivo = str(ev.get("motivo_no_match") or "")
@@ -1992,8 +2477,14 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
             if tipo in ("MATCH", "AVC"):
                 cls = str(ev.get("clase_avc_mapeada") or "")
                 if cls and cls not in ("0", "nan", "None"):
-                    class_totals.setdefault(cls, {"avc":0, "sat":0})
+                    class_totals.setdefault(cls, {"avc": 0, "sat": 0, "sat_money": 0.0, "avc_money": 0.0})
                     class_totals[cls]["avc"] += 1
+                    try:
+                        _t = _avc_tariffs_map.get(int(float(cls)), 0.0)
+                        class_totals[cls]["avc_money"] += _t
+                        lane_avc_money += _t
+                    except Exception:
+                        pass
             if tipo in ("MATCH", "SAT"):
                 sc = str(ev.get("id_classe") or "0")
                 tc = str(ev.get("tab_id_classe") or "0")
@@ -2003,8 +2494,15 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
                 except Exception:
                     eff = ""
                 if eff:
-                    class_totals.setdefault(eff, {"avc":0, "sat":0})
+                    class_totals.setdefault(eff, {"avc": 0, "sat": 0, "sat_money": 0.0, "avc_money": 0.0})
                     class_totals[eff]["sat"] += 1
+                try:
+                    _p = float(str(ev.get("sat_prix") or "0").replace(",", "").strip())
+                    if eff:
+                        class_totals[eff]["sat_money"] += _p
+                    lane_sat_money += _p
+                except Exception:
+                    pass
             if nota.startswith("ERROR"):
                 discrepancy_totals["ERROR_DETECCION_EJES_AVC"] = discrepancy_totals.get("ERROR_DETECCION_EJES_AVC", 0) + 1
 
@@ -2022,16 +2520,23 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
             "discrepancyRate": discrepancy_rate,
             "classMismatch": class_mismatch,
             "motives": motive_counts,
+            "sat_money": round(lane_sat_money, 2),
+            "avc_money": round(lane_avc_money, 2),
             "created_at": r["created_at"],
         }
         report_rows.append(row)
         worst_rows.append(row)
-        for key in totals:
+        for key in ("total", "matched", "avcOnly", "satOnly", "axleErr"):
             totals[key] += int(row[key])
+        totals["sat_money"] += lane_sat_money
+        totals["avc_money"] += lane_avc_money
 
     totals["matchRate"] = round((totals["total"] - totals["satOnly"]) / max(totals["total"], 1) * 100, 1)
     totals["discrepancyCount"] = totals["avcOnly"] + totals["satOnly"] + totals["axleErr"]
     totals["discrepancyRate"] = round(totals["discrepancyCount"] / max(totals["total"], 1) * 100, 1)
+    totals["sat_money"] = round(totals["sat_money"], 2)
+    totals["avc_money"] = round(totals["avc_money"], 2)
+    totals["money_delta"] = round(totals["avc_money"] - totals["sat_money"], 2)
 
     worst_rows = sorted(
         worst_rows,
@@ -2043,7 +2548,13 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
         for k, v in sorted(discrepancy_totals.items(), key=lambda item: item[1], reverse=True)
     ]
     class_breakdown = [
-        {"class_id": k, "avc": v["avc"], "sat": v["sat"], "delta": v["avc"] - v["sat"]}
+        {
+            "class_id": k,
+            "avc": v["avc"], "sat": v["sat"], "delta": v["avc"] - v["sat"],
+            "sat_money": round(v.get("sat_money", 0.0), 2),
+            "avc_money": round(v.get("avc_money", 0.0), 2),
+            "money_delta": round(v.get("avc_money", 0.0) - v.get("sat_money", 0.0), 2),
+        }
         for k, v in sorted(class_totals.items(), key=lambda item: int(float(item[0])) if str(item[0]).isdigit() else 999)
     ]
     lanes = sorted({r["lane"] for r in report_rows if r["lane"]})
@@ -2059,6 +2570,143 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
         "class_breakdown": class_breakdown,
         "worst_rows": worst_rows,
         "source": "recon_cache",
+    }
+
+
+@app.get("/api/reports/hourly")
+def get_reports_hourly(date_from: str = "", date_to: str = "", lanes: str = "", user=Depends(_get_user)):
+    """Distribución de eventos por hora del día desde recon_cache."""
+    cfg = load_saved_settings()
+    today = datetime.now(get_event_tz(cfg)).date()
+    if not date_to:
+        date_to = today.isoformat()
+    if not date_from:
+        date_from = today.isoformat()
+    try:
+        d_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+        d_to = datetime.strptime(date_to, "%Y-%m-%d").date()
+    except Exception:
+        raise HTTPException(400, "date_from/date_to deben usar YYYY-MM-DD")
+
+    lane_filter: set = set(l.strip() for l in lanes.split(",") if l.strip()) if lanes else set()
+    hourly: Dict[int, Dict[str, Any]] = {h: {"total": 0, "matched": 0, "avcOnly": 0, "satOnly": 0, "axleErr": 0} for h in range(24)}
+
+    with _db() as c:
+        db_rows = c.execute("SELECT cache_key, result_json FROM recon_cache ORDER BY cache_key").fetchall()
+
+    for r in db_rows:
+        parts = r["cache_key"].split("::", 2)
+        lane = parts[1] if len(parts) == 3 else (parts[0] if parts else "")
+        fecha = parts[2] if len(parts) == 3 else (parts[-1] if parts else "")
+        try:
+            row_date = datetime.strptime(fecha, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if row_date < d_from or row_date > d_to:
+            continue
+        if lane_filter and lane not in lane_filter:
+            continue
+        try:
+            events = json.loads(r["result_json"] or "[]")
+        except Exception:
+            continue
+        for ev in events:
+            tipo = ev.get("tipo", "")
+            ts_str = str(ev.get("event_mexico") or ev.get("avc_date") or ev.get("sat_date") or "")
+            if not ts_str or ts_str in ("None", "nan", ""):
+                continue
+            try:
+                hour = datetime.strptime(ts_str.replace("T", " ")[:19], "%Y-%m-%d %H:%M:%S").hour
+            except Exception:
+                continue
+            bucket = hourly[hour]
+            bucket["total"] += 1
+            nota = str(ev.get("nota_ejes") or "")
+            if tipo == "MATCH":
+                if nota.startswith("ERROR"):
+                    bucket["axleErr"] += 1
+                else:
+                    bucket["matched"] += 1
+            elif tipo == "AVC":
+                bucket["avcOnly"] += 1
+            elif tipo == "SAT":
+                bucket["satOnly"] += 1
+
+    return {
+        "date_from": d_from.isoformat(),
+        "date_to": d_to.isoformat(),
+        "hourly": [{"hour": h, **hourly[h]} for h in range(24)],
+    }
+
+
+@app.get("/api/reports/events")
+def get_reports_events(date_from: str = "", date_to: str = "", lanes: str = "", limit: int = 10000, user=Depends(_get_user)):
+    """Eventos detallados por-fila desde recon_cache para exportación Excel coloreada."""
+    cfg = load_saved_settings()
+    today = datetime.now(get_event_tz(cfg)).date()
+    if not date_to:
+        date_to = today.isoformat()
+    if not date_from:
+        date_from = today.isoformat()
+    try:
+        d_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+        d_to = datetime.strptime(date_to, "%Y-%m-%d").date()
+    except Exception:
+        raise HTTPException(400, "date_from/date_to deben usar YYYY-MM-DD")
+
+    lane_filter: set = set(l.strip() for l in lanes.split(",") if l.strip()) if lanes else set()
+
+    with _db() as c:
+        db_rows = c.execute("SELECT cache_key, result_json FROM recon_cache ORDER BY cache_key").fetchall()
+
+    result_events: List[Dict[str, Any]] = []
+    for r in db_rows:
+        if len(result_events) >= limit:
+            break
+        parts = r["cache_key"].split("::", 2)
+        lane = parts[1] if len(parts) == 3 else (parts[0] if parts else "")
+        fecha = parts[2] if len(parts) == 3 else (parts[-1] if parts else "")
+        try:
+            row_date = datetime.strptime(fecha, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if row_date < d_from or row_date > d_to:
+            continue
+        if lane_filter and lane not in lane_filter:
+            continue
+        try:
+            events = json.loads(r["result_json"] or "[]")
+        except Exception:
+            continue
+        for ev in events:
+            if len(result_events) >= limit:
+                break
+            result_events.append({
+                "fecha": fecha,
+                "carril": lane,
+                "tipo": ev.get("tipo", ""),
+                "match_valido": ev.get("match_valido", ""),
+                "avc_id": ev.get("avc_id") or ev.get("id") or "",
+                "avc_hora": ev.get("event_mexico") or ev.get("avc_date") or "",
+                "avc_vehiculo": ev.get("vehicle_type") or ev.get("Vehicle_type") or "",
+                "avc_ejes": ev.get("axle_count") or ev.get("axles_avc") or "",
+                "avc_clase": ev.get("clase_avc_mapeada") or "",
+                "sat_voie": ev.get("sat_voie") or "",
+                "sat_hora": ev.get("sat_date") or "",
+                "sat_numero": ev.get("sat_numero") or "",
+                "sat_id_classe": ev.get("id_classe") or "",
+                "sat_tab_id_classe": ev.get("tab_id_classe") or "",
+                "sat_precio": ev.get("sat_prix") or "",
+                "delta_segundos": ev.get("delta_segundos") or "",
+                "nota_ejes": ev.get("nota_ejes") or "",
+                "motivo_no_match": ev.get("motivo_no_match") or "",
+            })
+
+    return {
+        "date_from": d_from.isoformat(),
+        "date_to": d_to.isoformat(),
+        "count": len(result_events),
+        "events": result_events,
     }
 
 

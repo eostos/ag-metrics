@@ -275,19 +275,59 @@ function downloadBlob(content, filename, mimeType) {
   URL.revokeObjectURL(url);
 }
 
-function EventModal({ event, onClose }) {
+function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasPrevious, hasNext }) {
   if (!event) return null;
 
   const statusKey = event.tipo || event.status || "matched";
   const meta      = STATUS_META[statusKey] || STATUS_META.matched;
   const imageRef  = event.vehicle_image_url || event.avc_image_url || event.vehicle_image_path || event.avc_image_path || "";
   const satFile   = satMergedFileName(event);
+  const avcTs = event.avc_date || event.event_mexico || event.avcTime || "";
+  const satTs = event.sat_date || event.satTime || "";
+  const [satSnapshotSrc, setSatSnapshotSrc] = React.useState("");
+  const [satSnapshotError, setSatSnapshotError] = React.useState("");
+  const [satSnapshotCamera, setSatSnapshotCamera] = React.useState("");
 
   React.useEffect(() => {
-    function onKey(e) { if (e.key === "Escape") onClose(); }
+    function onKey(e) {
+      if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft" && hasPrevious) onPrevious();
+      if (e.key === "ArrowRight" && hasNext) onNext();
+    }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [hasPrevious,hasNext,onPrevious,onNext]);
+
+  React.useEffect(()=>{
+    if (!satTs || !sourceId || !laneId) return;
+    let objectUrl = "";
+    setSatSnapshotSrc("");
+    setSatSnapshotError("");
+    setSatSnapshotCamera("");
+    const params = new URLSearchParams({
+      source_id:String(sourceId),
+      avc_lane:laneId,
+      sat_timestamp:satTs,
+    });
+    fetch(`/api/sat-evidence/photo?${params.toString()}`, {
+      headers:{Authorization:`Bearer ${window.API.token()}`},
+    })
+      .then(async response=>{
+        if (!response.ok) {
+          let message = "No se pudo obtener la fotografía SAT";
+          try { message = (await response.json()).detail || message; } catch(e) {}
+          throw new Error(message);
+        }
+        setSatSnapshotCamera(response.headers.get("X-Alice-Camera")||"");
+        return response.blob();
+      })
+      .then(blob=>{
+        objectUrl = URL.createObjectURL(blob);
+        setSatSnapshotSrc(objectUrl);
+      })
+      .catch(err=>setSatSnapshotError(err.message||String(err)));
+    return ()=>{ if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  },[satTs,laneId,sourceId]);
 
   function handleBackdrop(e) { if (e.target === e.currentTarget) onClose(); }
 
@@ -303,6 +343,9 @@ function EventModal({ event, onClose }) {
 
   return (
     <div style={mStyles.overlay} onClick={handleBackdrop}>
+      <button onClick={onPrevious} disabled={!hasPrevious}
+        style={{...mStyles.sideArrow,left:18,opacity:hasPrevious?1:0.25,cursor:hasPrevious?"pointer":"default"}}
+        title="Evento anterior">‹</button>
       <div style={mStyles.modal}>
 
         {/* Header */}
@@ -319,20 +362,44 @@ function EventModal({ event, onClose }) {
           <button onClick={onClose} style={mStyles.closeBtn}>✕</button>
         </div>
 
+        <div style={mStyles.compareStrip}>
+          <div style={mStyles.timeBox}>
+            <span style={{display:"block",fontSize:11,color:"#5b6a8a",marginBottom:5}}>Hora AVC</span>
+            <strong style={{fontSize:18,color:"#e8edf5",fontFamily:"monospace"}}>{avcTs || "—"}</strong>
+          </div>
+          <div style={mStyles.timeBox}>
+            <span style={{display:"block",fontSize:11,color:"#5b6a8a",marginBottom:5}}>Hora SAT</span>
+            <strong style={{fontSize:18,color:"#e8edf5",fontFamily:"monospace"}}>{satTs || "—"}</strong>
+          </div>
+          <div style={mStyles.timeDelta}>Δ {event.delta_segundos || event.delta || "—"} s</div>
+        </div>
+
+        <div style={mStyles.imageCompare}>
+          <div style={mStyles.imagePane}>
+            <div style={mStyles.secTitle}>Imagen AVC registrada</div>
+            <VehicleImage imageRef={imageRef} avcId={event.id || event.avc_id || ""} />
+          </div>
+          <div style={mStyles.imagePane}>
+            <div style={mStyles.secTitle}>Foto requerida desde SAT</div>
+            <div style={mStyles.satShotBox}>
+              {!satTs && <span>Sin timestamp SAT</span>}
+              {satTs && !satSnapshotSrc && !satSnapshotError && <span>Solicitando snapshot...</span>}
+              {satSnapshotError && <span style={{color:"#ff4c6a",lineHeight:1.5}}>{satSnapshotError}</span>}
+              {satSnapshotSrc && <img src={satSnapshotSrc} alt="Snapshot SAT" style={mStyles.satShotImg}/>}
+            </div>
+            {satSnapshotCamera && <div style={mStyles.imageCaption}>{satSnapshotCamera}</div>}
+          </div>
+        </div>
+
         {/* Body — dos columnas */}
         <div style={mStyles.body}>
 
-          {/* Columna izquierda: imagen + datos AVC */}
+          {/* Columna izquierda: datos AVC */}
           <div style={mStyles.col}>
-            <div style={mStyles.secTitle}>Imagen AVC</div>
-            <div style={{marginBottom:16}}>
-              <VehicleImage imageRef={imageRef} avcId={event.id || event.avc_id || ""} />
-            </div>
-
             <div style={mStyles.secTitle}>Datos AVC</div>
             <div style={mStyles.card}>
               <Field label="ID Evento"     value={event.id || event.avc_id} />
-              <Field label="Timestamp"     value={event.avc_date || event.event_mexico || event.avcTime} />
+              <Field label="Timestamp"     value={avcTs} highlight="#e8edf5" />
               <Field label="Carril AVC"    value={event.avc_device || event.lane_name || event.lane} />
               <Field label="Tipo Vehículo" value={event.vehicle_type || event.Vehicle_type || event.vType} />
               <Field label="Ejes AVC"      value={event.axle_count || event.axles_avc} />
@@ -351,7 +418,7 @@ function EventModal({ event, onClose }) {
             <div style={{...mStyles.secTitle, marginTop:14}}>Transacción SAT</div>
             <div style={mStyles.card}>
               <Field label="Voie / Carril"  value={event.sat_voie} />
-              <Field label="Hora SAT"       value={event.sat_date || event.satTime} />
+              <Field label="Hora SAT"       value={satTs} highlight="#e8edf5" />
               <Field label="Número SAT"     value={event.sat_numero} />
               <Field label="Delta (s)"      value={event.delta_segundos || event.delta} />
               <Field label="id_classe"      value={rawClassValue(event.id_classe)} />
@@ -394,6 +461,9 @@ function EventModal({ event, onClose }) {
 
         </div>
       </div>
+      <button onClick={onNext} disabled={!hasNext}
+        style={{...mStyles.sideArrow,right:18,opacity:hasNext?1:0.25,cursor:hasNext?"pointer":"default"}}
+        title="Evento siguiente">›</button>
     </div>
   );
 }
@@ -421,9 +491,37 @@ const mStyles = {
     padding:"5px 11px", color:"#8a9ab5", fontSize:14, cursor:"pointer",
     fontFamily:"inherit", lineHeight:1,
   },
+  sideArrow: {
+    position:"fixed",top:"50%",transform:"translateY(-50%)",zIndex:1002,
+    width:48,height:72,borderRadius:8,border:"1px solid #2a3045",
+    background:"#0d1525",color:"#e8edf5",fontSize:40,lineHeight:1,
+    display:"flex",alignItems:"center",justifyContent:"center",
+    boxShadow:"0 12px 32px rgba(0,0,0,0.55)",
+  },
   body: {
     display:"flex", gap:20, padding:20, overflowY:"auto", flex:1,
   },
+  compareStrip: {
+    display:"grid", gridTemplateColumns:"1fr 1fr 110px", gap:12,
+    padding:"16px 20px", background:"#0a1020", borderBottom:"1px solid #1c2b46",
+  },
+  timeBox: {
+    background:"#080d1a", border:"1px solid #1e2535", borderRadius:8, padding:"11px 13px",
+  },
+  timeDelta: {
+    display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(91,156,246,0.12)",
+    border:"1px solid rgba(91,156,246,0.28)", borderRadius:8, color:"#5b9cf6", fontSize:18, fontWeight:800,
+  },
+  imageCompare: {
+    display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, padding:"18px 20px", borderBottom:"1px solid #1c2b46",
+  },
+  imagePane: {minWidth:0},
+  satShotBox: {
+    height:200, background:"#080d1a", border:"1px solid #2a3045", borderRadius:8,
+    display:"flex", alignItems:"center", justifyContent:"center", color:"#5b6a8a", fontSize:12, padding:10, textAlign:"center",
+  },
+  satShotImg: {width:"100%", height:"100%", objectFit:"contain", borderRadius:6},
+  imageCaption: {fontSize:11, color:"#5b9cf6", marginTop:6},
   col: { flex:1, display:"flex", flexDirection:"column", minWidth:0 },
   secTitle: {
     fontSize:10, color:"#5b6a8a", letterSpacing:1.2, textTransform:"uppercase",
@@ -461,6 +559,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
 
   const [satLanes,     setSatLanes]    = React.useState([]);
   const [satLane,      setSatLane]     = React.useState("");
+  const [laneSourceId, setLaneSourceId]= React.useState(lane.source_id||null);
   const [recoSource,   setRecoSource]  = React.useState("");
   const [laneMapping,  setLaneMapping] = React.useState({});
   const [mappingReady, setMappingReady]= React.useState(false); // true cuando config ha cargado
@@ -494,6 +593,15 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
   }
 
   React.useEffect(() => { loadEvents(date); }, [laneId, date]);
+
+  React.useEffect(()=>{
+    window.API.get(`/api/lanes?query_date=${date}`)
+      .then(data=>{
+        const current = (data.lanes||[]).find(item=>item.id===laneId);
+        setLaneSourceId(current?.source_id||null);
+      })
+      .catch(()=>setLaneSourceId(null));
+  },[laneId,date]);
 
   // Cargar mapeo desde configuración — una sola vez, marca mappingReady cuando termina
   React.useEffect(() => {
@@ -578,6 +686,15 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const paginated  = filtered.slice(page * pageSize, (page + 1) * pageSize);
+  const modalIndex = modalEvent ? filtered.indexOf(modalEvent) : -1;
+
+  function showPreviousEvent() {
+    if (modalIndex > 0) setModalEvent(filtered[modalIndex-1]);
+  }
+
+  function showNextEvent() {
+    if (modalIndex >= 0 && modalIndex < filtered.length-1) setModalEvent(filtered[modalIndex+1]);
+  }
 
   function toggleSort(col){if(sortCol===col)setSortDir(d=>-d);else{setSortCol(col);setSortDir(1);}}
 
@@ -779,8 +896,8 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
                     style={{background:rowBg,borderLeft:isSel?`3px solid ${meta.color}`:"3px solid transparent",cursor:"pointer",transition:"background 0.1s"}}>
                     <td style={{...ldStyles.td,...stickyCell(COLS[0],rowBg)}}>{ev.id||ev.avc_id||i+1}</td>
                     <td style={{...ldStyles.td,...stickyCell(COLS[1],rowBg)}}><span style={{color:meta.color,fontSize:11,fontWeight:600}}>{meta.icon} {meta.label}</span></td>
-                    <td style={{...ldStyles.td,...stickyCell(COLS[2],rowBg),fontFamily:"monospace",fontSize:11}}>{(ev.avc_date||ev.event_mexico||ev.avcTime||"—").slice(11,19)||ev.avc_date||"—"}</td>
-                    <td style={{...ldStyles.td,fontFamily:"monospace",fontSize:11,color:!ev.sat_date?"#243358":"inherit"}}>{ev.sat_date?"" + ev.sat_date.slice(11,19):"—"}</td>
+                    <td style={{...ldStyles.td,...stickyCell(COLS[2],rowBg),fontFamily:"monospace",fontSize:13,fontWeight:700,color:"#e8edf5"}}>{(ev.avc_date||ev.event_mexico||ev.avcTime||"—").slice(11,19)||ev.avc_date||"—"}</td>
+                    <td style={{...ldStyles.td,fontFamily:"monospace",fontSize:13,fontWeight:700,color:!ev.sat_date?"#243358":"#e8edf5"}}>{ev.sat_date?"" + ev.sat_date.slice(11,19):"—"}</td>
                     <td style={{...ldStyles.td,color:"#5b6a8a"}}>{ev.delta_segundos||"—"}</td>
                     <td style={ldStyles.td}>{ev.vehicle_type||ev.Vehicle_type||ev.vType||"—"}</td>
                     <td style={{...ldStyles.td,textAlign:"center"}}>{ev.axle_count||ev.axles_avc||"—"}</td>
@@ -789,8 +906,8 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
                     <td style={ldStyles.td}>{satClassCode(ev.tab_id_classe)}</td>
                     <td style={{...ldStyles.td,color:"#22c97b"}}>{ev.sat_prix||ev.amount||"—"}</td>
                     <td style={{...ldStyles.td,...stickyActionCell(rowBg),textAlign:"center",whiteSpace:"nowrap"}}>
-                      {(ev.vehicle_image_url||ev.avc_image_url||ev.vehicle_image_path) && (
-                        <button onClick={e=>{e.stopPropagation();setSelected(ev);}} style={ldStyles.camBtn} title="Ver imagen">📷</button>
+                      {(ev.vehicle_image_url||ev.avc_image_url||ev.vehicle_image_path||ev.sat_date) && (
+                        <button onClick={e=>{e.stopPropagation();setModalEvent(ev);}} style={ldStyles.camBtn} title="Ver evidencia">📷</button>
                       )}
                       <button onClick={e=>{e.stopPropagation();setModalEvent(ev);}} style={ldStyles.infoBtn} title="Más información">
                         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -839,7 +956,12 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
         </div>
       </div>
 
-      {modalEvent && <EventModal event={modalEvent} onClose={()=>setModalEvent(null)}/>}
+      {modalEvent && (
+        <EventModal event={modalEvent} laneId={laneId} sourceId={laneSourceId}
+          onClose={()=>setModalEvent(null)}
+          onPrevious={showPreviousEvent} onNext={showNextEvent}
+          hasPrevious={modalIndex>0} hasNext={modalIndex>=0&&modalIndex<filtered.length-1}/>
+      )}
     </div>
   );
 }

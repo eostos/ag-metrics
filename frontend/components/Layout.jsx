@@ -14,6 +14,7 @@ const NAV_ITEMS = [
       <path d="M5 9h8M5 6h5M5 12h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
     </svg>
   ), children: [
+    { id: "reports:view", label: "Ver Reporte" },
     { id: "reports:list", label: "Report List" },
     { id: "reports:create", label: "Create Report" },
     { id: "reports:settings", label: "Report Settings" },
