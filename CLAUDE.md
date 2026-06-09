@@ -64,7 +64,7 @@ Read `PROJECT_CONTEXT.md` before working on any task.
 
 ## Important Invariants
 
-- The `tipo` field on reconciliation rows is always one of: `"MATCH"`, `"AVC"`, `"SAT"`.
+- The `tipo` field on reconciliation rows is one of: `"MATCH"`, `"AVC"`, `"SAT"`, `"SP_EXCLUDED"`. The fourth value marks SAT events excluded from reconciliation (`id_obs_mp==30 AND id_classe==0 AND id_paiement==0`).
 - `match_valido` is `True` only for `MATCH` rows (not for axle-error matches — those are still valid matches).
 - SAT events are expected to arrive **before** the AVC event (SAT records the toll charge; AVC records the physical detection). The default window is 120s before AVC + 30s after.
 - AVC lane names and SAT voie identifiers are **not** the same namespace — the lane mapping config bridges them.

@@ -193,12 +193,12 @@ Alarms Phase 1 is basic configuration/history only:
 ## How AI Agents Should Reason About This Project
 
 - The **central data flow** is: AVC events ↔ SAT transactions, joined by time window + class compatibility.
-- The **reconciliation result** has three row types: `MATCH`, `AVC` (no SAT match), `SAT` (no AVC match).
+- The **reconciliation result** has four row types: `MATCH`, `AVC` (no SAT match), `SAT` (no AVC match), `SP_EXCLUDED` (SAT event excluded from reconciliation — `id_obs_mp==30 AND id_classe==0 AND id_paiement==0`).
 - The `tipo` field on each result row is the primary audit status field.
 - **Class mapping** is AVC-to-SAT: AVC uses `vehicle_type` strings + `axle_count` → mapped to a numeric SAT class (1–15, or 0 for invalid/unknown); SAT uses `id_classe` and `tab_id_classe`.
 - **Class compatibility is exact**: `is_class_compatible()` returns true only if the AVC mapped class equals `id_classe` or `tab_id_classe`. Do not describe category matching unless the code changes.
 - **Economic impact is not reconciliation logic**: it is reporting/management presentation. Do not change `engine.reconcile()` to calculate money; keep monetary estimates in `api.py`/Dashboard using `sat_prix` and `avc_tariffs`.
-- **`matchRate` is a detection-rate metric**, calculated as `(total - satOnly) / total * 100`; it is not the percentage of perfect MATCH rows.
+- **`matchRate` is a detection-rate metric**, calculated as `(total - satOnly) / total * 100`; it is not the percentage of perfect MATCH rows. `SP_EXCLUDED` rows are subtracted from `total` before this calculation.
 - **Lane identity** is a string (device name from AVC). SAT uses a "voie" number. The lane mapping config links AVC lane names to SAT voie identifiers.
 - **Source identity matters**: AVC events are stored per `source_id`, and reconciliation cache keys include `source_id`. When debugging stale or missing results, check whether the frontend/API request passed the expected `source_id`.
 - The `engine.py` file is the most critical file — it contains all business logic.

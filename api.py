@@ -33,6 +33,7 @@ import requests as _requests
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from engine import (
     SETTINGS_DB_PATH,
@@ -55,6 +56,7 @@ AVC_SYNC_INTERVAL_SECONDS = int(os.environ.get("AUDITEC_AVC_SYNC_INTERVAL_SECOND
 AVC_SYNC_ENABLED = os.environ.get("AUDITEC_AVC_SYNC_ENABLED", "1").lower() not in ("0", "false", "no")
 
 app = FastAPI(title="AG-metrics API", docs_url="/api/docs")
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 # ─────────────────────────────────────────────────────────
 # Esquema SQLite
@@ -428,6 +430,25 @@ def _auto_cols_sat(df: pd.DataFrame) -> Dict[str, str]:
         "prix":  detect_col(cols, [r"prix_total",r"price|precio|prix"]) or "",
     }
 
+def _resolve_sat_lane(avc_lane: str, sat_lanes: List[str], lane_mapping: Dict[str, Any]) -> str:
+    mapped = str(lane_mapping.get(avc_lane) or "").strip()
+    if mapped in sat_lanes:
+        return mapped
+
+    exact = next((v for v in sat_lanes if v == avc_lane or v in avc_lane or avc_lane in v), "")
+    if exact:
+        return exact
+
+    lane_match = re.search(r"carril[\s_-]*(\d+)", str(avc_lane), re.IGNORECASE)
+    if not lane_match:
+        return ""
+    lane_number = int(lane_match.group(1))
+    for sat_lane in sat_lanes:
+        sat_match = re.fullmatch(r"\s*T0*(\d+)\s*", str(sat_lane), re.IGNORECASE)
+        if sat_match and int(sat_match.group(1)) == lane_number:
+            return sat_lane
+    return ""
+
 def _load_sat_merged(day_str: str) -> pd.DataFrame:
     mp = os.path.join(MERGED_DIR, f"SAT-TEXCOCO-{day_str}-MERGED.json")
     if not os.path.exists(mp):
@@ -440,7 +461,8 @@ def _load_sat_merged(day_str: str) -> pd.DataFrame:
     return pd.DataFrame(txns)
 
 def _recon_summary(result: pd.DataFrame) -> Dict:
-    total    = len(result)
+    excluded = int((result["tipo"]=="SP_EXCLUDED").sum())
+    total    = len(result) - excluded
     matched  = int(result["match_valido"].sum())
     avc_only = int(((result["tipo"]=="AVC") & ~result["match_valido"]).sum())
     sat_only = int((result["tipo"]=="SAT").sum())
@@ -451,7 +473,7 @@ def _recon_summary(result: pd.DataFrame) -> Dict:
     detect_rate = round(avc_base / max(total, 1) * 100, 1)
     return {"total":total,"matched":matched,"avcOnly":avc_only,
             "satOnly":sat_only,"axleErr":axle_err,
-            "matchRate":detect_rate}
+            "excluded":excluded,"matchRate":detect_rate}
 
 
 def _reconcile_date_cache(day_str: str) -> None:
@@ -489,11 +511,7 @@ def _reconcile_date_cache(day_str: str) -> None:
             if not all(ac.values()) or ac["device"] not in avc_df.columns:
                 continue
             for lane_id in sorted(avc_df[ac["device"]].dropna().astype(str).unique()):
-                sat_lane = lane_mapping.get(lane_id)
-                if not sat_lane:
-                    sat_lane = next((v for v in sat_lanes if v == lane_id or v in lane_id or lane_id in v), "")
-                if not sat_lane and sat_lanes:
-                    sat_lane = sat_lanes[0]
+                sat_lane = _resolve_sat_lane(lane_id, sat_lanes, lane_mapping)
                 if not sat_lane:
                     continue
                 result = reconcile(
@@ -820,6 +838,8 @@ def _compute_report_hourly(date_from: str, date_to: str, lane_filter: list) -> L
                 continue
             for ev in events:
                 tipo = ev.get("tipo", "")
+                if tipo == "SP_EXCLUDED":
+                    continue
                 ts_str = str(ev.get("event_mexico") or ev.get("avc_date") or ev.get("sat_date") or "")
                 if not ts_str or ts_str in ("None", "nan", ""):
                     continue
@@ -1792,6 +1812,27 @@ def get_lane_events(lane_id: str, query_date: str = "",
     d     = datetime.strptime(query_date, "%Y-%m-%d").date() if query_date else date.today()
     fecha = d.isoformat()
 
+    # La vista normal solicita todos los eventos. El caché ya contiene JSON válido,
+    # así que evitar deserializarlo y serializarlo otra vez reduce bastante la espera.
+    if offset == 0 and limit <= 0:
+        with _db() as c:
+            cached = c.execute(
+                """
+                SELECT result_json, summary_json, json_array_length(result_json) AS event_count
+                FROM recon_cache
+                WHERE cache_key=?
+                """,
+                (_cache_key(lane_id, fecha, source_id or 0),),
+            ).fetchone()
+        if cached and cached["event_count"] > 0:
+            payload = (
+                '{"events":' + cached["result_json"]
+                + ',"total":' + str(cached["event_count"])
+                + ',"summary":' + cached["summary_json"]
+                + ',"source":"reconciled"}'
+            )
+            return Response(content=payload, media_type="application/json")
+
     def _paginate(rows):
         total = len(rows)
         sliced = rows[offset:offset + limit] if limit > 0 else rows
@@ -2422,7 +2463,7 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
                 pass
 
     report_rows: List[Dict[str, Any]] = []
-    totals = {"total":0, "matched":0, "avcOnly":0, "satOnly":0, "axleErr":0,
+    totals = {"total":0, "matched":0, "avcOnly":0, "satOnly":0, "axleErr":0, "excluded":0,
               "sat_money":0.0, "avc_money":0.0}
     discrepancy_totals: Dict[str, int] = {}
     class_totals: Dict[str, Dict] = {}
@@ -2457,6 +2498,7 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
         avc_only = int(summary.get("avcOnly") or 0)
         sat_only = int(summary.get("satOnly") or 0)
         axle_err = int(summary.get("axleErr") or 0)
+        excluded = int(summary.get("excluded") or 0)
         match_rate = float(summary.get("matchRate") or 0)
         discrepancy_count = avc_only + sat_only + axle_err
         discrepancy_rate = round(discrepancy_count / max(total, 1) * 100, 1)
@@ -2467,6 +2509,8 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
         lane_avc_money = 0.0
         for ev in events:
             tipo = ev.get("tipo", "")
+            if tipo == "SP_EXCLUDED":
+                continue
             motivo = str(ev.get("motivo_no_match") or "")
             nota = str(ev.get("nota_ejes") or "")
             if motivo:
@@ -2515,6 +2559,7 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
             "avcOnly": avc_only,
             "satOnly": sat_only,
             "axleErr": axle_err,
+            "excluded": excluded,
             "matchRate": match_rate,
             "discrepancyCount": discrepancy_count,
             "discrepancyRate": discrepancy_rate,
@@ -2526,7 +2571,7 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
         }
         report_rows.append(row)
         worst_rows.append(row)
-        for key in ("total", "matched", "avcOnly", "satOnly", "axleErr"):
+        for key in ("total", "matched", "avcOnly", "satOnly", "axleErr", "excluded"):
             totals[key] += int(row[key])
         totals["sat_money"] += lane_sat_money
         totals["avc_money"] += lane_avc_money
@@ -2612,6 +2657,8 @@ def get_reports_hourly(date_from: str = "", date_to: str = "", lanes: str = "", 
             continue
         for ev in events:
             tipo = ev.get("tipo", "")
+            if tipo == "SP_EXCLUDED":
+                continue
             ts_str = str(ev.get("event_mexico") or ev.get("avc_date") or ev.get("sat_date") or "")
             if not ts_str or ts_str in ("None", "nan", ""):
                 continue

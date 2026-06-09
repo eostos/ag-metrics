@@ -116,6 +116,9 @@ Every event in the reconciliation output has a `tipo` field:
 | `MATCH` | AVC event matched to a SAT transaction | `True` |
 | `AVC` | AVC event with no SAT match in window | `False` |
 | `SAT` | SAT transaction with no AVC event | `False` |
+| `SP_EXCLUDED` | SAT transaction excluded from reconciliation (non-conciliable system event) | `False` |
+
+`SP_EXCLUDED` rows are generated when a SAT event meets **all three** conditions: `id_obs_mp == 30`, `id_classe == 0`, and `id_paiement == 0`. These represent administrative/system events that are not real vehicle transactions and should not be reconciled against AVC events.
 
 Even `MATCH` rows with axle errors have `match_valido = True`. The axle error is reported in `nota_ejes` and affects the `axleErr` counter in the summary.
 
@@ -135,6 +138,7 @@ Even `MATCH` rows with axle errors have `match_valido = True`. The axle error is
 | `motivo_no_match` | `"moto_SAT_sin_AVC"` | SAT motorcycle charge without AVC detection |
 | `motivo_no_match` | `"SAT_clase_indefinida"` | SAT `id_classe == 0` and no `tab_id_classe` |
 | `motivo_no_match` | `"AVC_no_detecto"` | SAT transaction with no AVC event in window |
+| `motivo_no_match` | `"evento_no_conciliable_obs_mp_30"` | SAT event excluded as non-conciliable (`SP_EXCLUDED` row) |
 
 ---
 
@@ -144,14 +148,15 @@ Even `MATCH` rows with axle errors have `match_valido = True`. The axle error is
 
 | Metric | Definition |
 |--------|-----------|
-| `total` | All rows (MATCH + AVC-only + SAT-only) |
+| `total` | Conciliable rows only: `len(result) - excluded` (excludes `SP_EXCLUDED`) |
 | `matched` | Rows where `match_valido == True` |
 | `avcOnly` | Rows where `tipo == "AVC"` and not matched |
 | `satOnly` | Rows where `tipo == "SAT"` |
 | `axleErr` | Rows where `match_valido == True` and `nota_ejes` starts with `"ERROR"` |
+| `excluded` | Rows where `tipo == "SP_EXCLUDED"` (non-conciliable SAT events, not counted in total) |
 | `matchRate` | `avc_base / total * 100` where `avc_base = total - satOnly` (AVC detection rate) |
 
-**matchRate** measures what fraction of all vehicle events (AVC + SAT-only) were detected by the AVC system, not what fraction were perfectly matched.
+**matchRate** measures what fraction of all vehicle events (AVC + SAT-only) were detected by the AVC system, not what fraction were perfectly matched. `SP_EXCLUDED` rows do not affect this metric.
 
 ---
 

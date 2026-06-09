@@ -37,13 +37,29 @@ const STATUS_META = {
   MATCH:      {label:"Coincidencia", color:"#22c97b", bg:"rgba(34,201,123,0.08)", icon:"✓"},
   AVC:        {label:"AVC sin SP",   color:"#ff7e3f", bg:"rgba(255,126,63,0.08)", icon:"◎"},
   SAT:        {label:"SP sin AVC",   color:"#5b9cf6", bg:"rgba(91,156,246,0.08)", icon:"🚧"},
+  SP_EXCLUDED:{label:"No conciliable",color:"#ff4c6a", bg:"rgba(255,76,106,0.08)", icon:"⊘"},
 };
 
 const LANE_TABS = [
   {id:"all",label:"Todos"},{id:"MATCH",label:"Coincidencias"},
   {id:"AVC",label:"AVC sin SP"},{id:"SAT",label:"SP sin AVC"},
+  {id:"SP_EXCLUDED",label:"No entra en conciliación"},
   {id:"axle_error",label:"Error Ejes"},
 ];
+
+function resolveDetailSatLane(avcLane, satLanes, mapping) {
+  const mapped = String((mapping||{})[avcLane] || "").trim();
+  if (satLanes.includes(mapped)) return mapped;
+  const byName = satLanes.find(v=>v===avcLane||v.includes(avcLane)||avcLane.includes(v));
+  if (byName) return byName;
+  const laneMatch = String(avcLane||"").match(/carril[\s_-]*(\d+)/i);
+  if (!laneMatch) return "";
+  const laneNumber = Number(laneMatch[1]);
+  return satLanes.find(v=>{
+    const satMatch = String(v||"").match(/^T0*(\d+)$/i);
+    return satMatch && Number(satMatch[1]) === laneNumber;
+  }) || "";
+}
 
 const SAT_EXTRA_FIELDS = [
   ["day_id", "sat_day_id"],
@@ -260,6 +276,7 @@ function excelStatusColors(row) {
   }
   if (tipo === "AVC") return { bg:"#fce4d6", fg:"#9c4a14", border:"#ff7e3f" };
   if (tipo === "SAT") return { bg:"#ddebf7", fg:"#1f4e79", border:"#5b9cf6" };
+  if (tipo === "SP_EXCLUDED") return { bg:"#f8d7da", fg:"#842029", border:"#ff4c6a" };
   return { bg:"#e2f0d9", fg:"#276e3a", border:"#22c97b" };
 }
 
@@ -539,7 +556,7 @@ const mStyles = {
   fieldVal: { fontSize:11, color:"#e8edf5", fontWeight:500, textAlign:"right", wordBreak:"break-all" },
 };
 
-function LaneDetail({ laneId, onBack, initialFilter }) {
+function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
   const lane = (window.LANE_CONFIGS||[]).find(l=>l.id===laneId)||{name:laneId};
   const today = (() => { try { return new Date().toLocaleDateString("en-CA",{timeZone:"America/Mexico_City"}); } catch(e){ return new Date().toISOString().slice(0,10); } })();
 
@@ -551,7 +568,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
   const [sortCol,  setSortCol]   = React.useState("id");
   const [sortDir,  setSortDir]   = React.useState(1);
   const [search,   setSearch]    = React.useState("");
-  const [date,     setDate]      = React.useState(today);
+  const [date,     setDate]      = React.useState(initialDate||today);
   const [reconRunning, setReconRunning] = React.useState(false);
   const [modalEvent,   setModalEvent]   = React.useState(null);
   const [page,         setPage]         = React.useState(0);
@@ -559,6 +576,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
 
   const [satLanes,     setSatLanes]    = React.useState([]);
   const [satLane,      setSatLane]     = React.useState("");
+  const [satLanesDate, setSatLanesDate]= React.useState("");
   const [laneSourceId, setLaneSourceId]= React.useState(lane.source_id||null);
   const [recoSource,   setRecoSource]  = React.useState("");
   const [laneMapping,  setLaneMapping] = React.useState({});
@@ -567,16 +585,26 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
 
   // Resetear conciliación al cambiar carril o fecha
   const didAutoReconRef = React.useRef(false);
+  const eventsRequestRef = React.useRef(0);
+  const satLanesRequestRef = React.useRef(0);
+  const reconcileRequestRef = React.useRef(0);
   React.useEffect(() => {
     didAutoReconRef.current = false;
+    reconcileRequestRef.current += 1;
     setRecoSource("");
     setAllEvents([]);
+    setReconRunning(false);
+    setPage(0);
+    setSelected(null);
+    setModalEvent(null);
   }, [laneId, date]);
 
   function loadEvents(d) {
+    const requestId = ++eventsRequestRef.current;
     setLoading(true); setApiErr("");
     window.API.get(`/api/lanes/${encodeURIComponent(laneId)}/events?query_date=${d}`)
       .then(data => {
+        if (requestId !== eventsRequestRef.current) return;
         if (data.events && data.events.length > 0) {
           setAllEvents(data.events);
           if (data.source === "reconciled") {
@@ -588,20 +616,30 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
           if (data.error) setApiErr(data.error);
         }
       })
-      .catch(() => { setApiErr("Sin conexión AVC. Verifica la configuración de fuentes."); setAllEvents([]); })
-      .finally(() => setLoading(false));
+      .catch(() => {
+        if (requestId !== eventsRequestRef.current) return;
+        setApiErr("Sin conexión AVC. Verifica la configuración de fuentes.");
+        setAllEvents([]);
+      })
+      .finally(() => {
+        if (requestId === eventsRequestRef.current) setLoading(false);
+      });
   }
 
   React.useEffect(() => { loadEvents(date); }, [laneId, date]);
 
   React.useEffect(()=>{
+    if (lane.source_id) {
+      setLaneSourceId(lane.source_id);
+      return;
+    }
     window.API.get(`/api/lanes?query_date=${date}`)
       .then(data=>{
         const current = (data.lanes||[]).find(item=>item.id===laneId);
         setLaneSourceId(current?.source_id||null);
       })
       .catch(()=>setLaneSourceId(null));
-  },[laneId,date]);
+  },[laneId,date,lane.source_id]);
 
   // Cargar mapeo desde configuración — una sola vez, marca mappingReady cuando termina
   React.useEffect(() => {
@@ -617,14 +655,18 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
   // Cargar voies SAT — espera a que el mapeo esté listo para elegir el correcto
   React.useEffect(() => {
     if (!mappingReady) return; // no ejecutar hasta tener el mapeo
+    const requestId = ++satLanesRequestRef.current;
+    setSatLanes([]);
+    setSatLane("");
+    setSatLanesDate("");
     const dayStr = date.replace(/-/g,"");
     window.API.get(`/api/sat/lanes?day=${dayStr}`)
       .then(data => {
+        if (requestId !== satLanesRequestRef.current) return;
+        setSatLanesDate(date);
         if (data.lanes && data.lanes.length > 0) {
           setSatLanes(data.lanes);
-          const mapped = laneMapping[laneId];
-          const byName = data.lanes.find(v => v===laneId || v.includes(laneId) || laneId.includes(v));
-          setSatLane(mapped || byName || data.lanes[0]);
+          setSatLane(resolveDetailSatLane(laneId, data.lanes, laneMapping));
         }
       })
       .catch(()=>{});
@@ -633,6 +675,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
   function runReconcile(satLaneOverride) {
     const lane = satLaneOverride || satLane;
     if (!lane) { setApiErr("No hay carril SP configurado para este carril AVC"); return; }
+    const requestId = ++reconcileRequestRef.current;
     setReconRunning(true); setApiErr("");
     window.API.post("/api/reconcile", {
       avc_lane: laneId,
@@ -641,25 +684,30 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
       window_s: 120,
     })
       .then(data => {
+        if (requestId !== reconcileRequestRef.current) return;
         if (data.error) { setApiErr(data.error); return; }
         if (data.result && data.result.length > 0) {
           setAllEvents(data.result);
           setRecoSource("reconciled");
         }
       })
-      .catch(() => setApiErr("Error en conciliación"))
-      .finally(() => setReconRunning(false));
+      .catch(() => {
+        if (requestId === reconcileRequestRef.current) setApiErr("Error en conciliación");
+      })
+      .finally(() => {
+        if (requestId === reconcileRequestRef.current) setReconRunning(false);
+      });
   }
 
   // ── Auto-conciliación: espera que el mapeo esté listo antes de disparar ──
   React.useEffect(() => {
     if (didAutoReconRef.current) return;
     if (reconRunning) return;
-    if (!mappingReady || !satLane || allEvents.length === 0) return; // esperar mapeo
+    if (!mappingReady || satLanesDate !== date || !satLane || allEvents.length === 0) return;
     if (recoSource === "reconciled") { didAutoReconRef.current = true; return; }
     didAutoReconRef.current = true;
     runReconcile(satLane);
-  }, [satLane, allEvents.length, recoSource, mappingReady]); // eslint-disable-line
+  }, [date, satLane, satLanesDate, allEvents.length, recoSource, mappingReady]); // eslint-disable-line
 
   const filtered = React.useMemo(() => {
     let evts = activeTab==="all" ? allEvents : allEvents.filter(e=>(e.tipo||e.status)===activeTab);
@@ -753,6 +801,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
       { label: STATUS_META.MATCH.label, color: "#22c97b" },
       { label: STATUS_META.AVC.label, color: "#ff7e3f" },
       { label: STATUS_META.SAT.label, color: "#5b9cf6" },
+      { label: STATUS_META.SP_EXCLUDED.label, color: "#ff4c6a" },
       { label: STATUS_META.axle_error.label, color: "#f5d433" },
     ].map(m => (
       `<span class="legend-item"><span class="swatch" style="background-color:${m.color};"></span>${excelEscape(m.label)}</span>`

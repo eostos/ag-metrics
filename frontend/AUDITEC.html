@@ -30,7 +30,7 @@
   <script>
     // Limpiar caché de Babel standalone para forzar recompilación con el nuevo diseño
     (function(){
-      var ver = "20260609b";
+      var ver = "20260609g";
       if (localStorage.getItem("agm_ver") !== ver) {
         Object.keys(localStorage).forEach(function(k){
           if (k.startsWith("babel-") || k.startsWith("__babel")) localStorage.removeItem(k);
@@ -42,9 +42,9 @@
   <script type="text/babel" src="components/MockData.jsx?v=20260525d"></script>
   <script type="text/babel" src="components/Auth.jsx?v=20260525d"></script>
   <script type="text/babel" src="components/Layout.jsx?v=20260529a"></script>
-  <script type="text/babel" src="components/Dashboard.jsx?v=20260525d"></script>
-  <script type="text/babel" src="components/LaneDetail.jsx?v=20260609b"></script>
-  <script type="text/babel" src="components/Config.jsx?v=20260609b"></script>
+  <script type="text/babel" src="components/Dashboard.jsx?v=20260609g"></script>
+  <script type="text/babel" src="components/LaneDetail.jsx?v=20260609g"></script>
+  <script type="text/babel" src="components/Config.jsx?v=20260609g"></script>
   <script type="text/babel" src="components/Reports.jsx?v=20260529a"></script>
   <script type="text/babel" src="components/Operations.jsx?v=20260529b"></script>
 
@@ -292,6 +292,7 @@
       const [view, setView]         = React.useState("dashboard");
       const [activeLane, setActiveLane] = React.useState(null);
       const [activeLaneFilter, setActiveLaneFilter] = React.useState(null);
+      const [activeLaneDate, setActiveLaneDate] = React.useState(null);
       const [uiLanguage, setUiLanguage] = React.useState(window.getUILanguage());
 
       React.useEffect(() => {
@@ -328,11 +329,15 @@
         window.API.post("/api/auth/logout", {}).catch(() => {});
         localStorage.removeItem("auditec_token");
         localStorage.removeItem("auditec_user");
-        setUser(null); setActiveLane(null); setActiveLaneFilter(null); setView("dashboard");
+        setUser(null); setActiveLane(null); setActiveLaneFilter(null); setActiveLaneDate(null); setView("dashboard");
       }
 
-      function handleNavigate(v) { setView(v); setActiveLane(null); setActiveLaneFilter(null); }
-      function handleOpenLane(id, filter) { setActiveLane(id); setActiveLaneFilter(filter || null); }
+      function handleNavigate(v) { setView(v); setActiveLane(null); setActiveLaneFilter(null); setActiveLaneDate(null); }
+      function handleOpenLane(id, filter, selectedDate) {
+        setActiveLane(id);
+        setActiveLaneFilter(filter || null);
+        setActiveLaneDate(selectedDate || null);
+      }
 
       if (!user) return <LoginScreen onLogin={handleLogin}/>;
 
@@ -347,7 +352,7 @@
         <AppLayout user={user} onLogout={handleLogout} currentView={view}
           onNavigate={handleNavigate} title={window.t(pageInfo.title)} subtitle={window.t(pageInfo.subtitle)}>
           {view==="dashboard" && !activeLane && <Dashboard onOpenLane={handleOpenLane} user={user}/>}
-          {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} initialFilter={activeLaneFilter} onBack={()=>{setActiveLane(null);setActiveLaneFilter(null);}}/>}
+          {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} initialDate={activeLaneDate} initialFilter={activeLaneFilter} onBack={()=>{setActiveLane(null);setActiveLaneFilter(null);setActiveLaneDate(null);}}/>}
           {viewRoot==="reports" && viewSection==="view" && <ReportsScreen/>}
           {viewRoot==="reports" && viewSection!=="view" && <ReportsModule section={viewSection || "list"}/>}
           {viewRoot==="alarms" && user.role==="Admin" && <AlarmsModule section={viewSection || "active"}/>}

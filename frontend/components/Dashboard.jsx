@@ -42,6 +42,7 @@ function MatchRing({ pct, size=52 }) {
 function LaneCard({ lane, stats, onClick }) {
   const [hov, setHov] = React.useState(false);
   const s = stats || {};
+  const reconciliationRate = s.total > 0 ? Math.round((Number(s.matched||0) / Number(s.total)) * 1000) / 10 : 0;
   return (
     <div onClick={onClick}
       onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
@@ -51,7 +52,9 @@ function LaneCard({ lane, stats, onClick }) {
           <div style={{fontSize:13,fontWeight:700,color:"#e8edf5"}}>{lane.name}</div>
           {lane.source_name && <div style={{fontSize:10,color:"#5b6a8a",marginTop:2}}>{lane.source_name}</div>}
         </div>
-        <MatchRing pct={s.matchRate||0}/>
+        <span title="Porcentaje de eventos conciliables con coincidencia AVC/SP">
+          <MatchRing pct={reconciliationRate}/>
+        </span>
       </div>
       <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
         <span style={{...dashStyles.badge,background:"rgba(34,201,123,0.12)",color:"#22c97b"}}>✓ {(s.matched||0).toLocaleString()}</span>
@@ -61,9 +64,9 @@ function LaneCard({ lane, stats, onClick }) {
       </div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
         <div>
-          <div style={{fontSize:11,color:"#5b6a8a"}}>Total AVC</div>
+          <div style={{fontSize:11,color:"#5b6a8a"}}>Total conciliable</div>
           <div style={{fontSize:18,fontWeight:700,color:"#e8edf5"}}>{(s.total||0).toLocaleString()}</div>
-          {!(s.matchRate>0) && <div style={{fontSize:10,color:"#243358",marginTop:1}}>Sin conciliar</div>}
+          {!(s.matched>0) && <div style={{fontSize:10,color:"#243358",marginTop:1}}>Sin coincidencias</div>}
         </div>
         <Sparkline data={s.spark||[0]} color="#4d7fe0"/>
       </div>
@@ -196,6 +199,20 @@ function localToday(tz) {
   }
 }
 
+function resolveSatLane(avcLane, satLanes, mapping) {
+  const mapped = String((mapping||{})[avcLane] || "").trim();
+  if (satLanes.includes(mapped)) return mapped;
+  const byName = satLanes.find(v=>v===avcLane||v.includes(avcLane)||avcLane.includes(v));
+  if (byName) return byName;
+  const laneMatch = String(avcLane||"").match(/carril[\s_-]*(\d+)/i);
+  if (!laneMatch) return "";
+  const laneNumber = Number(laneMatch[1]);
+  return satLanes.find(v=>{
+    const satMatch = String(v||"").match(/^T0*(\d+)$/i);
+    return satMatch && Number(satMatch[1]) === laneNumber;
+  }) || "";
+}
+
 // ─── Dashboard principal ───
 function Dashboard({ onOpenLane, user }) {
   const [plaza,       setPlaza]      = React.useState("");
@@ -299,9 +316,7 @@ function Dashboard({ onOpenLane, user }) {
         }
         const laneId = lane.id;
         setActivity({label:"Conciliando",detail:`${done + 1}/${lanes.length} · ${laneId}`});
-        const mapped = mapping[laneId];
-        const byName = satLanes.find(v=>v===laneId||v.includes(laneId)||laneId.includes(v));
-        const satLane = mapped || byName || satLanes[0];
+        const satLane = resolveSatLane(laneId, satLanes, mapping);
         if (!satLane) { next(); return; }
 
         window.API.post("/api/reconcile",{avc_lane:laneId,sat_lane:satLane,date:d,window_s:120})
@@ -555,7 +570,7 @@ function Dashboard({ onOpenLane, user }) {
         {configs.map(lane=>(
           <LaneCard key={lane.id} lane={lane}
             stats={stats[lane.id]||{total:0,matched:0,avcOnly:0,satOnly:0,axleErr:0,matchRate:0,spark:[0]}}
-            onClick={()=>onOpenLane(lane.id)}/>
+            onClick={()=>onOpenLane(lane.id, null, date)}/>
         ))}
         {configs.length===0 && !loading && (
           <div style={{gridColumn:"1/-1",textAlign:"center",padding:"40px 20px",color:"#5b6a8a"}}>
@@ -687,7 +702,7 @@ function ClassBreakdown({ date, onOpenLane }) {
                       type: "class_diff",
                       class_id: b.class_id,
                       class_name: b.name,
-                    })}
+                    }, date)}
                     style={{
                       background:`${laneDeltaColor}14`,border:`1px solid ${laneDeltaColor}40`,
                       color:laneDeltaColor,borderRadius:5,padding:"4px 7px",fontSize:10,

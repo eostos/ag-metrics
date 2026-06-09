@@ -665,6 +665,22 @@ def reconcile(
             "sat_fh_carga": safe(sat_f, "fh_carga", j),
         }
 
+    def is_sat_excluded(j) -> bool:
+        def is_number(value, expected: int) -> bool:
+            try:
+                raw = str(value).strip()
+                return raw != "" and int(float(raw)) == expected
+            except Exception:
+                return False
+
+        return (
+            is_number(safe(sat_f, "id_obs_mp", j), 30)
+            and is_number(safe(sat_f, col_sat_cls, j), 0)
+            and is_number(safe(sat_f, "id_paiement", j), 0)
+        )
+
+    excluded_sat = {j for j in range(len(sat_f)) if is_sat_excluded(j)}
+
     for i in range(n_avc):
         if progress_callback and i % 50 == 0:
             progress_callback(i / n_avc)
@@ -688,7 +704,7 @@ def reconcile(
 
         cands = []
         for j in range(lo, hi):
-            if j in used_sat:
+            if j in used_sat or j in excluded_sat:
                 continue
             delta = sat_ts_s[j] - ts_avc_s  # negativo = SAT antes de AVC (correcto)
             sc = sat_cls_pre[j]
@@ -808,6 +824,30 @@ def reconcile(
         tc_val = safe(sat_f, col_sat_tab, j)
         sc = _int_cls(sc_val)
         tc = _int_cls(tc_val)
+        if j in excluded_sat:
+            rows.append(
+                {
+                    "tipo": "SP_EXCLUDED",
+                    **{key: "" for key in ["avc_id", "avc_device", "avc_date", "avc_image_url", "avc_image_path", "Vehicle_type", "axles_avc", "clase_avc_mapeada"]},
+                    "sat_voie": safe(sat_f, col_sat_voie, j),
+                    "sat_date": str(safe(sat_f, col_sat_date, j)),
+                    "sat_numero": safe(sat_f, col_sat_num, j),
+                    "sat_prix": safe(sat_f, col_sat_prix, j),
+                    **sat_extra_fields(j),
+                    "id_classe": sc_val,
+                    "tab_id_classe": tc_val,
+                    "sat_id_classe_desc": sat_desc(sc),
+                    "sat_id_classe_ejes": sat_ejes(sc),
+                    "sat_tab_id_classe_desc": sat_desc(tc),
+                    "sat_tab_id_classe_ejes": sat_ejes(tc),
+                    **{key: "" for key in ["comparacion_ejes_id", "comparacion_ejes_tab", "nota_ejes", "delta_segundos", "direccion_delta"]},
+                    "match_valido": False,
+                    "motivo_no_match": "evento_no_conciliable_obs_mp_30",
+                    "observacion_auditoria": "Evento SP no entra en conciliación",
+                    "candidatos_sat": "",
+                }
+            )
+            continue
         eff = tc or sc
         motivo = (
             "moto_SAT_sin_AVC" if eff == 15
