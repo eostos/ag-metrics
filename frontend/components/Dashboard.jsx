@@ -42,33 +42,58 @@ function MatchRing({ pct, size=52 }) {
 function LaneCard({ lane, stats, onClick }) {
   const [hov, setHov] = React.useState(false);
   const s = stats || {};
-  const reconciliationRate = s.total > 0 ? Math.round((Number(s.matched||0) / Number(s.total)) * 1000) / 10 : 0;
+  const matchRate = s.matchRate || 0;
+  const avcTotal  = (s.matched||0) + (s.avcOnly||0);
+  const spTotal   = (s.matched||0) + (s.satOnly||0);
+  const avcSpRate = spTotal > 0 ? Math.round(avcTotal / spTotal * 1000) / 10 : 0;
+  const mColor    = matchRate>=97?"#22c97b":matchRate>=93?"#f5d433":matchRate>0?"#ff4c6a":"#3a4a6b";
+  const asColor   = (avcSpRate>=95&&avcSpRate<=105)?"#22c97b"
+                  :(avcSpRate>=85&&avcSpRate<=125)?"#f5d433"
+                  :avcSpRate>0?"#ff4c6a":"#3a4a6b";
   return (
     <div onClick={onClick}
       onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
       style={{...dashStyles.laneCard, borderColor:hov?"#4d7fe0":"#1c2b46", transform:hov?"translateY(-2px)":"none"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-        <div>
-          <div style={{fontSize:13,fontWeight:700,color:"#e8edf5"}}>{lane.name}</div>
-          {lane.source_name && <div style={{fontSize:10,color:"#5b6a8a",marginTop:2}}>{lane.source_name}</div>}
-        </div>
-        <span title="Porcentaje de eventos conciliables con coincidencia AVC/SP">
-          <MatchRing pct={reconciliationRate}/>
-        </span>
+      {/* Header */}
+      <div style={{marginBottom:10}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#e8edf5"}}>{lane.name}</div>
+        {lane.source_name && <div style={{fontSize:10,color:"#5b6a8a",marginTop:2}}>{lane.source_name}</div>}
       </div>
+      {/* Badges */}
       <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
         <span style={{...dashStyles.badge,background:"rgba(34,201,123,0.12)",color:"#22c97b"}}>✓ {(s.matched||0).toLocaleString()}</span>
         <span style={{...dashStyles.badge,background:"rgba(255,126,63,0.12)",color:"#ff7e3f"}}>◎ {(s.avcOnly||0).toLocaleString()}</span>
         <span style={{...dashStyles.badge,background:"rgba(91,156,246,0.12)",color:"#5b9cf6"}}>◎ {(s.satOnly||0).toLocaleString()}</span>
         <span style={{...dashStyles.badge,background:"rgba(245,212,51,0.12)",color:"#f5d433"}}>⚠ {(s.axleErr||0).toLocaleString()}</span>
       </div>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
+      {/* Total + sparkline */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:12}}>
         <div>
           <div style={{fontSize:11,color:"#5b6a8a"}}>Total conciliable</div>
           <div style={{fontSize:18,fontWeight:700,color:"#e8edf5"}}>{(s.total||0).toLocaleString()}</div>
-          {!(s.matched>0) && <div style={{fontSize:10,color:"#243358",marginTop:1}}>Sin coincidencias</div>}
         </div>
         <Sparkline data={s.spark||[0]} color="#4d7fe0"/>
+      </div>
+      {/* Dual metric footer */}
+      <div style={{display:"flex",borderTop:"1px solid #1c2b46",paddingTop:10}}>
+        <div style={{flex:1,textAlign:"center",paddingRight:10,borderRight:"1px solid #1c2b46"}}
+          title="Tasa de detección: fracción de todos los eventos que cuentan con detección AVC">
+          <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.5px",lineHeight:1,color:mColor}}>
+            {matchRate>0?`${matchRate}%`:"—"}
+          </div>
+          <div style={{fontSize:9,color:"#5b6a8a",textTransform:"uppercase",letterSpacing:"0.7px",marginTop:5}}>
+            Detección
+          </div>
+        </div>
+        <div style={{flex:1,textAlign:"center",paddingLeft:10}}
+          title="Ratio AVC/SP: eventos detectados por AVC respecto a transacciones registradas por SP. >100% indica sobre-detección AVC.">
+          <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.5px",lineHeight:1,color:asColor}}>
+            {avcSpRate>0?`${avcSpRate}%`:"—"}
+          </div>
+          <div style={{fontSize:9,color:"#5b6a8a",textTransform:"uppercase",letterSpacing:"0.7px",marginTop:5}}>
+            AVC / SP
+          </div>
+        </div>
       </div>
     </div>
   );
