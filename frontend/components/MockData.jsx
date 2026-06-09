@@ -98,7 +98,7 @@ function generateEvents(laneId, count = 120) {
       satClass: (status === "avc_only") ? "—" : satClass,
       lane: laneId,
       amount: (status === "avc_only") ? "—" : `$${amount}`,
-      notes: status === "axle_error" ? "Diferencia de ejes" : status === "avc_only" ? "Sin cobro SAT" : status === "sat_only" ? "Sin evento AVC" : "",
+      notes: status === "axle_error" ? "Diferencia de ejes" : status === "avc_only" ? "Sin cobro SP" : status === "sat_only" ? "Sin evento AVC" : "",
       hasPhoto,
       plate: hasPhoto ? `${["ABC","XYZ","MNO","PQR"][randInt(0,3)]}-${randInt(100,999)}-${["B","C","D","F"][randInt(0,3)]}` : null,
     });

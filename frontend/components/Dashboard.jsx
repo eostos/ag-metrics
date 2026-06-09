@@ -82,8 +82,8 @@ function SummaryChart({ lanes, stats }) {
         labels: lanes.map(l=>l.id),
         datasets:[
           {label:"Matched",    data:lanes.map(l=>(stats[l.id]||{}).matched||0),  backgroundColor:"#22c97b",borderRadius:3},
-          {label:"AVC sin SAT",data:lanes.map(l=>(stats[l.id]||{}).avcOnly||0), backgroundColor:"#ff7e3f",borderRadius:3},
-          {label:"SAT sin AVC",data:lanes.map(l=>(stats[l.id]||{}).satOnly||0), backgroundColor:"#5b9cf6",borderRadius:3},
+          {label:"AVC sin SP",data:lanes.map(l=>(stats[l.id]||{}).avcOnly||0), backgroundColor:"#ff7e3f",borderRadius:3},
+          {label:"SP sin AVC",data:lanes.map(l=>(stats[l.id]||{}).satOnly||0), backgroundColor:"#5b9cf6",borderRadius:3},
           {label:"Error Ejes", data:lanes.map(l=>(stats[l.id]||{}).axleErr||0), backgroundColor:"#f5d433",borderRadius:3},
         ],
       },
@@ -134,9 +134,9 @@ function LiveBar({ status, lastRefresh, bgSyncing }) {
       <span style={{fontWeight:700,color:"#4d7fe0",fontFamily:"monospace"}}>{avcEvts.toLocaleString()}</span>
       <span title="Última actualización AVC" style={{color:"#5b6a8a"}}>act. {shortDateTime(status.avc_updated_at)}</span>
       <span style={{color:"#162036"}}>|</span>
-      <span style={{color:"#5b6a8a"}}>SAT</span>
+      <span style={{color:"#5b6a8a"}}>SP</span>
       <span style={{fontWeight:700,color:"#5b9cf6",fontFamily:"monospace"}}>{satMerged.toLocaleString()}</span>
-      <span title="Última actualización SAT" style={{color:"#5b6a8a"}}>act. {shortDateTime(status.sat_updated_at)}</span>
+      <span title="Última actualización SP" style={{color:"#5b6a8a"}}>act. {shortDateTime(status.sat_updated_at)}</span>
       {satPend>0 && (
         <span style={{background:"rgba(245,212,51,0.15)",color:"#f5d433",
           padding:"1px 6px",borderRadius:4,fontWeight:600}}>
@@ -365,7 +365,7 @@ function Dashboard({ onOpenLane, user }) {
           const processing = s.processing || {};
           if (processing.state && !["ready", "error"].includes(processing.state)) {
             const labels = {
-              merging_sat: "Fusionando SAT",
+              merging_sat: "Fusionando SP",
               reconciling: "Conciliando",
               syncing_avc: "Sincronizando AVC",
             };
@@ -384,9 +384,9 @@ function Dashboard({ onOpenLane, user }) {
 
           // Auto-merge SAT pendientes (silencioso)
           if ((s.sat_pending||0) > 0) {
-            setActivity({label:"Fusionando SAT",detail:`${s.sat_pending} pendiente(s)`});
+            setActivity({label:"Fusionando SP",detail:`${s.sat_pending} pendiente(s)`});
             window.API.post("/api/merge-sat",{day:(s.date||date).replace(/-/g,"")})
-              .then(r=>{ if(r&&r.ok&&r.added>0) setSyncMsg(`↺ ${r.added} SAT fusionados automáticamente`); setTimeout(()=>setSyncMsg(""),4000); })
+              .then(r=>{ if(r&&r.ok&&r.added>0) setSyncMsg(`↺ ${r.added} registros SP fusionados automáticamente`); setTimeout(()=>setSyncMsg(""),4000); })
               .catch(()=>{})
               .finally(()=>{ if (!bgReconInProgressRef.current && !syncing && !bgSyncing) setActivity({label:"",detail:""}); });
             return;
@@ -453,7 +453,7 @@ function Dashboard({ onOpenLane, user }) {
   const totalSatOnly = configs.reduce((s,l)=>s+(stats[l.id]?.satOnly||0),0);
   // avcBase = eventos AVC (matched + AVC-only); totalEvents incluye también SAT-solo
   const avcBase = totalEvents - totalSatOnly;
-  // Tasa global = AVC detectados / (AVC detectados + SAT sin AVC)
+  // Tasa global = AVC detectados / (AVC detectados + SP sin AVC)
   // = qué fracción del total real de vehículos capturó el AVC
   const overallRate = totalEvents > 0 ? Math.round(avcBase/totalEvents*1000)/10 : 0;
 
@@ -520,10 +520,10 @@ function Dashboard({ onOpenLane, user }) {
       {/* KPI strip */}
       <div style={dashStyles.kpiStrip}>
         {[
-          {label:"Eventos AVC",   value:avcBase.toLocaleString(),      color:"#e8edf5",icon:"📡"},
+          {label:"Eventos AVC",   value:avcBase.toLocaleString(),      color:"#e8edf5",icon:"📷"},
           {label:"Coincidencias", value:totalMatched.toLocaleString(), color:"#22c97b",icon:"✅"},
-          {label:"AVC sin SAT",   value:totalAvcOnly.toLocaleString(), color:"#ff7e3f",icon:"🔶"},
-          {label:"SAT sin AVC",   value:totalSatOnly.toLocaleString(), color:"#5b9cf6",icon:"🔵"},
+          {label:"AVC sin SP",    value:totalAvcOnly.toLocaleString(), color:"#ff7e3f",icon:"🔶"},
+          {label:"SP sin AVC",    value:totalSatOnly.toLocaleString(), color:"#5b9cf6",icon:"🚧"},
           {label:"Detección AVC",
            value:totalEvents>0?`${overallRate}%`:"—",
            color:overallRate>=97?"#22c97b":overallRate>=94?"#f5d433":totalEvents>0?"#ff4c6a":"#5b6a8a",
@@ -544,7 +544,7 @@ function Dashboard({ onOpenLane, user }) {
         display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <span>
           {configs.length} carril(es) AVC
-          {liveStatus?.sat_lanes?.length?` · ${liveStatus.sat_lanes.length} SAT`:""}
+          {liveStatus?.sat_lanes?.length?` · ${liveStatus.sat_lanes.length} SP`:""}
           {plaza?` — ${plaza}`:""} — {date}
         </span>
         {configs.length>0 && <span style={{color:"#243358"}}>Haz clic en un carril para conciliar</span>}
@@ -580,7 +580,7 @@ function Dashboard({ onOpenLane, user }) {
   );
 }
 
-// ─── Comparativa de clases AVC vs SAT ───
+// ─── Comparativa de clases AVC vs SP ───
 function ClassBreakdown({ date, onOpenLane }) {
   const [data, setData] = React.useState(null);
 
@@ -640,7 +640,7 @@ function ClassBreakdown({ date, onOpenLane }) {
         {/* SAT row */}
         <div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-            <span style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.3}}>SAT</span>
+            <span style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.3}}>SP</span>
             <span style={{fontSize:12,fontWeight:700,color:"#5b9cf6"}}>{b.sat.toLocaleString()}</span>
           </div>
           <div style={{height:5,background:"#162036",borderRadius:3}}>
@@ -657,7 +657,7 @@ function ClassBreakdown({ date, onOpenLane }) {
             </div>
           </div>
           <div>
-            <div style={{fontSize:9,color:"#5b6a8a",letterSpacing:0.4,textTransform:"uppercase"}}>SAT real</div>
+            <div style={{fontSize:9,color:"#5b6a8a",letterSpacing:0.4,textTransform:"uppercase"}}>SP real</div>
             <div style={{fontSize:12,fontWeight:800,color:"#8bbcff",marginTop:2}}>
               {moneyFmt(b.sat_amount)}
             </div>
@@ -714,7 +714,7 @@ function ClassBreakdown({ date, onOpenLane }) {
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
         <div>
-          <div style={{fontSize:13,fontWeight:700,color:"#e8edf5"}}>Comparativa por Clase — AVC vs SAT</div>
+          <div style={{fontSize:13,fontWeight:700,color:"#e8edf5"}}>Comparativa por Clase — AVC vs SP</div>
           <div style={{fontSize:11,color:"#5b6a8a",marginTop:2}}>
             Clasificación vehicular · sin ejes · {data.date}
           </div>
@@ -726,18 +726,18 @@ function ClassBreakdown({ date, onOpenLane }) {
           </span>
           <span style={{display:"flex",alignItems:"center",gap:5}}>
             <span style={{width:10,height:10,borderRadius:"50%",background:"#5b9cf6",display:"inline-block"}}/>
-            <span style={{color:"#8a9ab5"}}>SAT</span>
+            <span style={{color:"#8a9ab5"}}>SP</span>
           </span>
           <span style={{display:"flex",alignItems:"center",gap:5}}>
             <span style={{width:10,height:10,borderRadius:2,background:"rgba(255,126,63,0.25)",display:"inline-block"}}/>
-            <span style={{color:"#8a9ab5"}}>+AVC · −SAT</span>
+            <span style={{color:"#8a9ab5"}}>+AVC · −SP</span>
           </span>
         </div>
       </div>
 
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10,marginBottom:16}}>
         <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
-          <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>SAT registrado</div>
+          <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>SP registrado</div>
           <div style={{fontSize:20,fontWeight:800,color:"#8bbcff",marginTop:4}}>{moneyFmt(money.sat_amount)}</div>
         </div>
         <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
@@ -753,7 +753,7 @@ function ClassBreakdown({ date, onOpenLane }) {
         <div style={{background:"#0f1928",border:"1px solid #162036",borderRadius:8,padding:"12px 14px"}}>
           <div style={{fontSize:10,color:"#5b6a8a",letterSpacing:0.7,textTransform:"uppercase"}}>Base de cálculo</div>
           <div style={{fontSize:11,fontWeight:600,color:"#8a9ab5",lineHeight:1.35,marginTop:5}}>
-            SAT real por cobro · AVC por tarifa configurada
+            SP real por cobro · AVC por tarifa configurada
           </div>
         </div>
       </div>

@@ -27,13 +27,13 @@ function reportRateColor(rate) {
 
 function motiveLabel(motivo) {
   const labels = {
-    SAT_no_detecto: "AVC sin SAT en ventana",
+    SAT_no_detecto: "AVC sin SP en ventana",
     clase_distinta: "Clase incompatible",
     error_conteo_avc: "Error conteo AVC",
     moto_detectada_solo_por_avc: "Moto solo AVC",
-    AVC_no_detecto: "SAT sin AVC",
-    moto_SAT_sin_AVC: "Moto SAT sin AVC",
-    SAT_clase_indefinida: "SAT clase indefinida",
+    AVC_no_detecto: "SP sin AVC",
+    moto_SAT_sin_AVC: "Moto SP sin AVC",
+    SAT_clase_indefinida: "SP clase indefinida",
     ERROR_DETECCION_EJES_AVC: "Error detección ejes",
   };
   return labels[motivo] || motivo || "Sin motivo";
@@ -86,16 +86,16 @@ function downloadBlob(content, filename, mimeType) {
 function buildDetailExcel(events, dateFrom, dateTo, showAxle) {
   const headers = [
     "Fecha","Carril","Estado","AVC ID","AVC Hora","AVC Vehículo","AVC Ejes","AVC Clase",
-    "SAT Voie","SAT Hora","SAT Número","SAT Id Clase","SAT Tab Clase","SAT Precio ($)",
+    "SP Carril","SP Hora","SP Número","SP Id Clase","SP Tab Clase","SP Precio ($)",
     "Delta (s)","Motivo No Match",
     ...(showAxle ? ["Nota Ejes"] : []),
   ];
-  const statusLabels = { MATCH:"Coincidencia", AVC:"Solo AVC", SAT:"Solo SAT" };
+  const statusLabels = { MATCH:"Coincidencia", AVC:"Solo AVC", SAT:"Solo SP" };
   const legend = [
     {color:"#e2f0d9", label:"Coincidencia (MATCH)"},
     ...(showAxle ? [{color:"#fff2cc", label:"Error de ejes (MATCH con diferencia)"}] : []),
-    {color:"#fce4d6", label:"Solo AVC — sin SAT"},
-    {color:"#ddebf7", label:"Solo SAT — sin AVC"},
+    {color:"#fce4d6", label:"Solo AVC — sin SP"},
+    {color:"#ddebf7", label:"Solo SP — sin AVC"},
   ];
   const legendHtml = legend.map(m =>
     `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:11px;">
@@ -136,7 +136,7 @@ function buildDetailExcel(events, dateFrom, dateTo, showAxle) {
 body{font-family:Arial,sans-serif;font-size:11px;}
 table{border-collapse:collapse;width:100%;}
 </style></head><body>
-<h3 style="color:#162036;">Conciliación AVC/SAT — Detalle por evento</h3>
+<h3 style="color:#162036;">Conciliación AVC/SP — Detalle por evento</h3>
 <p style="color:#475569;">Período: ${excelEscape(dateFrom)} al ${excelEscape(dateTo)} &nbsp;|&nbsp; Total eventos: ${events.length}</p>
 <div style="margin-bottom:10px;">${legendHtml}</div>
 <table>
@@ -302,7 +302,7 @@ function ReportsScreen() {
         datasets: [
           { label:"Coincidencia", data: hourlyData.hourly.map(h=>h.matched), backgroundColor:"rgba(34,201,123,0.75)", stack:"s" },
           { label:"Solo AVC",    data: hourlyData.hourly.map(h=>h.avcOnly),  backgroundColor:"rgba(255,126,63,0.75)", stack:"s" },
-          { label:"Solo SAT",    data: hourlyData.hourly.map(h=>h.satOnly),  backgroundColor:"rgba(91,156,246,0.75)", stack:"s" },
+          { label:"Solo SP",     data: hourlyData.hourly.map(h=>h.satOnly),  backgroundColor:"rgba(91,156,246,0.75)", stack:"s" },
           ...(isAdmin ? [{ label:"Error ejes", data: hourlyData.hourly.map(h=>h.axleErr), backgroundColor:"rgba(245,212,51,0.75)", stack:"s" }] : []),
         ],
       },
@@ -325,10 +325,10 @@ function ReportsScreen() {
     const rows = displayRows.map(r => {
       const row = {
         Fecha: r.date, Carril: r.lane, Total: r.total, Coincidencias: r.matched,
-        "AVC sin SAT": r.avcOnly, "SAT sin AVC": r.satOnly,
+        "AVC sin SP": r.avcOnly, "SP sin AVC": r.satOnly,
         "Clase distinta": r.classMismatch, "Match rate": `${r.matchRate}%`,
         "Discrepancias": r.discrepancyCount, "% discrepancia": `${r.discrepancyRate}%`,
-        "SAT facturado": r.sat_money, "AVC estimado": r.avc_money,
+        "SP facturado": r.sat_money, "AVC estimado": r.avc_money,
       };
       if (isAdmin) row["Error ejes"] = r.axleErr;
       return row;
@@ -435,8 +435,8 @@ th{background:#162036;color:#fff;font-weight:bold;}th,td{border:1px solid #9aa4b
         {[
           {label:"Total Eventos",     value:reportNum(filteredTotals.total),        color:"#e8edf5"},
           {label:"Coincidencias",     value:reportNum(filteredTotals.matched),       color:"#22c97b"},
-          {label:"AVC sin SAT",       value:reportNum(filteredTotals.avcOnly),       color:"#ff7e3f"},
-          {label:"SAT sin AVC",       value:reportNum(filteredTotals.satOnly),       color:"#5b9cf6"},
+          {label:"AVC sin SP",        value:reportNum(filteredTotals.avcOnly),       color:"#ff7e3f"},
+          {label:"SP sin AVC",        value:reportNum(filteredTotals.satOnly),       color:"#5b9cf6"},
           ...(isAdmin ? [{label:"Error Ejes", value:reportNum(filteredTotals.axleErr), color:"#f5d433"}] : []),
           {label:"Tasa Detección",    value:`${filteredTotals.matchRate}%`,          color:reportRateColor(filteredTotals.matchRate)},
         ].map(k => (
@@ -450,9 +450,9 @@ th{background:#162036;color:#fff;font-weight:bold;}th,td{border:1px solid #9aa4b
       {/* ── KPIs económicos ── */}
       <div style={{display:"grid", gridTemplateColumns:"repeat(3, minmax(160px,1fr))", gap:12, marginBottom:24}}>
         <div style={{...rptStyles.kpiCard, borderColor:"rgba(91,156,246,0.35)"}}>
-          <div style={{fontSize:11, color:"#5b6a8a", marginBottom:4}}>SAT Facturado (real)</div>
+          <div style={{fontSize:11, color:"#5b6a8a", marginBottom:4}}>SP Facturado (real)</div>
           <div style={{fontSize:22, fontWeight:800, color:"#5b9cf6"}}>{reportMoney(filteredTotals.sat_money)}</div>
-          <div style={{fontSize:10, color:"#5b6a8a", marginTop:3}}>Suma de sat_prix en transacciones MATCH y SAT</div>
+          <div style={{fontSize:10, color:"#5b6a8a", marginTop:3}}>Suma de sat_prix en transacciones coincidentes y SP</div>
         </div>
         <div style={{...rptStyles.kpiCard, borderColor:"rgba(255,126,63,0.35)"}}>
           <div style={{fontSize:11, color:"#5b6a8a", marginBottom:4}}>AVC Estimado (tarifas config.)</div>
@@ -460,12 +460,12 @@ th{background:#162036;color:#fff;font-weight:bold;}th,td{border:1px solid #9aa4b
           <div style={{fontSize:10, color:"#5b6a8a", marginTop:3}}>Conteos AVC × tarifas configuradas en Sistema</div>
         </div>
         <div style={{...rptStyles.kpiCard, borderColor: filteredTotals.money_delta > 0 ? "rgba(255,76,106,0.35)" : "rgba(34,201,123,0.35)"}}>
-          <div style={{fontSize:11, color:"#5b6a8a", marginBottom:4}}>Delta AVC − SAT</div>
+          <div style={{fontSize:11, color:"#5b6a8a", marginBottom:4}}>Delta AVC − SP</div>
           <div style={{fontSize:22, fontWeight:800, color: filteredTotals.money_delta > 0 ? "#ff4c6a" : "#22c97b"}}>
             {filteredTotals.money_delta >= 0 ? "+" : ""}{reportMoney(filteredTotals.money_delta)}
           </div>
           <div style={{fontSize:10, color:"#5b6a8a", marginTop:3}}>
-            {filteredTotals.money_delta > 0 ? "AVC detectó más de lo facturado por SAT" : filteredTotals.money_delta < 0 ? "SAT facturó más de lo detectado por AVC" : "Sin diferencia"}
+            {filteredTotals.money_delta > 0 ? "AVC detectó más de lo facturado por SP" : filteredTotals.money_delta < 0 ? "SP facturó más de lo detectado por AVC" : "Sin diferencia"}
           </div>
         </div>
       </div>
@@ -522,15 +522,15 @@ th{background:#162036;color:#fff;font-weight:bold;}th,td{border:1px solid #9aa4b
         </div>
       </div>
 
-      {/* ── Comparativa por clase: AVC vs SAT con dinero ── */}
+      {/* ── Comparativa por clase: AVC vs SP con dinero ── */}
       {classBreakdown.length > 0 && (
         <div style={{...rptStyles.panel, marginBottom:24}}>
-          <div style={rptStyles.panelTitle}>Comparativa por clase — AVC vs SAT</div>
+          <div style={rptStyles.panelTitle}>Comparativa por clase — AVC vs SP</div>
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%", borderCollapse:"collapse", fontSize:12}}>
               <thead>
                 <tr style={{background:"#070c18"}}>
-                  {["Clase","AVC det.","SAT trans.","Delta det.","SAT Facturado","AVC Estimado","Delta ($)"].map(h => (
+                  {["Clase","AVC det.","SP trans.","Delta det.","SP Facturado","AVC Estimado","Delta ($)"].map(h => (
                     <th key={h} style={rptStyles.th}>{h}</th>
                   ))}
                 </tr>
@@ -584,7 +584,7 @@ th{background:#162036;color:#fff;font-weight:bold;}th,td{border:1px solid #9aa4b
           <table style={{width:"100%", borderCollapse:"collapse", fontSize:12}}>
             <thead>
               <tr style={{background:"#070c18", position:"sticky", top:0}}>
-                {["Fecha","Carril","Total","Coincidencias","AVC sin SAT","SAT sin AVC",...(isAdmin?["Err. Ejes"]:[]),"Clase dist.","Detección","% Disc.","SAT $","AVC $"].map(h => (
+                {["Fecha","Carril","Total","Coincidencias","AVC sin SP","SP sin AVC",...(isAdmin?["Err. Ejes"]:[]),"Clase dist.","Detección","% Disc.","SP $","AVC $"].map(h => (
                   <th key={h} style={rptStyles.th}>{h}</th>
                 ))}
               </tr>

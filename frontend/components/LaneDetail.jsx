@@ -31,17 +31,17 @@ function satClassCode(raw) {
 
 const STATUS_META = {
   matched:    {label:"Coincidencia", color:"#22c97b", bg:"rgba(34,201,123,0.08)", icon:"✓"},
-  avc_only:   {label:"AVC sin SAT",  color:"#ff7e3f", bg:"rgba(255,126,63,0.08)", icon:"◎"},
-  sat_only:   {label:"SAT sin AVC",  color:"#5b9cf6", bg:"rgba(91,156,246,0.08)", icon:"◎"},
+  avc_only:   {label:"AVC sin SP",   color:"#ff7e3f", bg:"rgba(255,126,63,0.08)", icon:"◎"},
+  sat_only:   {label:"SP sin AVC",   color:"#5b9cf6", bg:"rgba(91,156,246,0.08)", icon:"🚧"},
   axle_error: {label:"Error de Ejes",color:"#f5d433", bg:"rgba(245,212,51,0.08)", icon:"⚠"},
   MATCH:      {label:"Coincidencia", color:"#22c97b", bg:"rgba(34,201,123,0.08)", icon:"✓"},
-  AVC:        {label:"AVC sin SAT",  color:"#ff7e3f", bg:"rgba(255,126,63,0.08)", icon:"◎"},
-  SAT:        {label:"SAT sin AVC",  color:"#5b9cf6", bg:"rgba(91,156,246,0.08)", icon:"◎"},
+  AVC:        {label:"AVC sin SP",   color:"#ff7e3f", bg:"rgba(255,126,63,0.08)", icon:"◎"},
+  SAT:        {label:"SP sin AVC",   color:"#5b9cf6", bg:"rgba(91,156,246,0.08)", icon:"🚧"},
 };
 
 const LANE_TABS = [
   {id:"all",label:"Todos"},{id:"MATCH",label:"Coincidencias"},
-  {id:"AVC",label:"AVC sin SAT"},{id:"SAT",label:"SAT sin AVC"},
+  {id:"AVC",label:"AVC sin SP"},{id:"SAT",label:"SP sin AVC"},
   {id:"axle_error",label:"Error Ejes"},
 ];
 
@@ -144,7 +144,7 @@ function EvidencePanel({ event }) {
 
       {hasSat && (
         <div style={evStyles.section}>
-          <div style={evStyles.sectionTitle}>Archivo SAT origen</div>
+          <div style={evStyles.sectionTitle}>Archivo SP origen</div>
           {[
             ["Nombre", satFile ? satFile.name : "—"],
             ["Ruta",   satFile ? satFile.path : "—"],
@@ -159,16 +159,16 @@ function EvidencePanel({ event }) {
 
       {hasSat && (
         <div style={evStyles.section}>
-          <div style={evStyles.sectionTitle}>Transacción SAT</div>
+          <div style={evStyles.sectionTitle}>Transacción SP</div>
           {[
             ["Voie / Carril",  event.sat_voie||"—"],
-            ["Hora SAT",       event.sat_date||event.satTime||"—"],
-            ["Número SAT",     event.sat_numero||"—"],
+            ["Hora SP",        event.sat_date||event.satTime||"—"],
+            ["Número SP",      event.sat_numero||"—"],
             ["Delta (s)",      event.delta_segundos||event.delta||"—"],
             ["id_classe",      rawClassValue(event.id_classe)],
             ["tab_id_classe",  rawClassValue(event.tab_id_classe)],
-            ["Clase SAT",      event.sat_id_classe_desc||event.satClass||"—"],
-            ["Ejes SAT",       event.sat_id_classe_ejes||event.axlesSat||"—"],
+            ["Clase SP",       event.sat_id_classe_desc||event.satClass||"—"],
+            ["Ejes SP",        event.sat_id_classe_ejes||event.axlesSat||"—"],
             ["Monto",          event.sat_prix||event.amount||"—"],
             ...SAT_EXTRA_FIELDS.map(([label, key]) => [label, event[key] || "—"]),
           ].map(([k,v])=>(
@@ -232,14 +232,14 @@ function reconciliationExportRows(events) {
       "AVC tipo vehiculo": ev.vehicle_type || ev.Vehicle_type || "",
       "AVC ejes": ev.axle_count || ev.axles_avc || "",
       "AVC clase mapeada": ev.clase_avc_mapeada || "",
-      "SAT voie": ev.sat_voie || "",
-      "SAT hora": ev.sat_date || "",
-      "SAT numero": ev.sat_numero || "",
-      "SAT id_classe": ev.id_classe || "",
-      "SAT tab_id_classe": ev.tab_id_classe || "",
-      "SAT clase id desc": ev.sat_id_classe_desc || "",
-      "SAT clase tab desc": ev.sat_tab_id_classe_desc || "",
-      "SAT precio": ev.sat_prix || "",
+      "SP carril": ev.sat_voie || "",
+      "SP hora": ev.sat_date || "",
+      "SP numero": ev.sat_numero || "",
+      "SP id_classe": ev.id_classe || "",
+      "SP tab_id_classe": ev.tab_id_classe || "",
+      "SP clase id desc": ev.sat_id_classe_desc || "",
+      "SP clase tab desc": ev.sat_tab_id_classe_desc || "",
+      "SP precio": ev.sat_prix || "",
       "Delta segundos": ev.delta_segundos || "",
       "Direccion delta": ev.direccion_delta || "",
       "Nota ejes": ev.nota_ejes || "",
@@ -247,7 +247,7 @@ function reconciliationExportRows(events) {
       "Comparacion ejes tab": ev.comparacion_ejes_tab || "",
       "Motivo no match": ev.motivo_no_match || "",
       "Observacion auditoria": ev.observacion_auditoria || "",
-      "Candidatos SAT": ev.candidatos_sat || "",
+      "Candidatos SP": ev.candidatos_sat || "",
     };
   });
 }
@@ -314,7 +314,7 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
     })
       .then(async response=>{
         if (!response.ok) {
-          let message = "No se pudo obtener la fotografía SAT";
+          let message = "No se pudo obtener la fotografía SP";
           try { message = (await response.json()).detail || message; } catch(e) {}
           throw new Error(message);
         }
@@ -368,7 +368,7 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
             <strong style={{fontSize:18,color:"#e8edf5",fontFamily:"monospace"}}>{avcTs || "—"}</strong>
           </div>
           <div style={mStyles.timeBox}>
-            <span style={{display:"block",fontSize:11,color:"#5b6a8a",marginBottom:5}}>Hora SAT</span>
+            <span style={{display:"block",fontSize:11,color:"#5b6a8a",marginBottom:5}}>Hora SP</span>
             <strong style={{fontSize:18,color:"#e8edf5",fontFamily:"monospace"}}>{satTs || "—"}</strong>
           </div>
           <div style={mStyles.timeDelta}>Δ {event.delta_segundos || event.delta || "—"} s</div>
@@ -380,12 +380,12 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
             <VehicleImage imageRef={imageRef} avcId={event.id || event.avc_id || ""} />
           </div>
           <div style={mStyles.imagePane}>
-            <div style={mStyles.secTitle}>Foto requerida desde SAT</div>
+            <div style={mStyles.secTitle}>Foto requerida desde SP</div>
             <div style={mStyles.satShotBox}>
-              {!satTs && <span>Sin timestamp SAT</span>}
+              {!satTs && <span>Sin timestamp SP</span>}
               {satTs && !satSnapshotSrc && !satSnapshotError && <span>Solicitando snapshot...</span>}
               {satSnapshotError && <span style={{color:"#ff4c6a",lineHeight:1.5}}>{satSnapshotError}</span>}
-              {satSnapshotSrc && <img src={satSnapshotSrc} alt="Snapshot SAT" style={mStyles.satShotImg}/>}
+              {satSnapshotSrc && <img src={satSnapshotSrc} alt="Snapshot SP" style={mStyles.satShotImg}/>}
             </div>
             {satSnapshotCamera && <div style={mStyles.imageCaption}>{satSnapshotCamera}</div>}
           </div>
@@ -409,24 +409,24 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
 
           {/* Columna derecha: archivo SAT + transacción + diagnóstico */}
           <div style={mStyles.col}>
-            <div style={mStyles.secTitle}>Archivo SAT origen</div>
+            <div style={mStyles.secTitle}>Archivo SP origen</div>
             <div style={mStyles.card}>
               <Field label="Nombre" value={satFile ? satFile.name : "—"} />
               <Field label="Ruta"   value={satFile ? satFile.path : "—"} />
             </div>
 
-            <div style={{...mStyles.secTitle, marginTop:14}}>Transacción SAT</div>
+            <div style={{...mStyles.secTitle, marginTop:14}}>Transacción SP</div>
             <div style={mStyles.card}>
               <Field label="Voie / Carril"  value={event.sat_voie} />
-              <Field label="Hora SAT"       value={satTs} highlight="#e8edf5" />
-              <Field label="Número SAT"     value={event.sat_numero} />
+              <Field label="Hora SP"        value={satTs} highlight="#e8edf5" />
+              <Field label="Número SP"      value={event.sat_numero} />
               <Field label="Delta (s)"      value={event.delta_segundos || event.delta} />
               <Field label="id_classe"      value={rawClassValue(event.id_classe)} />
               <Field label="tab_id_classe"  value={rawClassValue(event.tab_id_classe)} />
-              <Field label="Clase SAT"      value={event.sat_id_classe_desc} />
-              <Field label="Ejes SAT id"    value={event.sat_id_classe_ejes} />
-              <Field label="Clase SAT tab"  value={event.sat_tab_id_classe_desc} />
-              <Field label="Ejes SAT tab"   value={event.sat_tab_id_classe_ejes} />
+              <Field label="Clase SP"       value={event.sat_id_classe_desc} />
+              <Field label="Ejes SP id"     value={event.sat_id_classe_ejes} />
+              <Field label="Clase SP tab"   value={event.sat_tab_id_classe_desc} />
+              <Field label="Ejes SP tab"    value={event.sat_tab_id_classe_ejes} />
               <Field label="Monto"          value={event.sat_prix || event.amount} highlight="#22c97b" />
               {SAT_EXTRA_FIELDS.map(([label, key]) => (
                 <Field key={key} label={label} value={event[key]} />
@@ -444,7 +444,7 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
 
             {event.candidatos_sat && event.candidatos_sat !== "nan" && (
               <>
-                <div style={{...mStyles.secTitle, marginTop:14}}>Candidatos SAT evaluados</div>
+                <div style={{...mStyles.secTitle, marginTop:14}}>Candidatos SP evaluados</div>
                 <div style={{background:"#080d1a",borderRadius:8,padding:"10px 12px",border:"1px solid #1e2535",fontSize:11,color:"#5b6a8a",wordBreak:"break-all",lineHeight:1.7}}>
                   {event.candidatos_sat}
                 </div>
@@ -632,7 +632,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
 
   function runReconcile(satLaneOverride) {
     const lane = satLaneOverride || satLane;
-    if (!lane) { setApiErr("No hay voie SAT configurado para este carril"); return; }
+    if (!lane) { setApiErr("No hay carril SP configurado para este carril AVC"); return; }
     setReconRunning(true); setApiErr("");
     window.API.post("/api/reconcile", {
       avc_lane: laneId,
@@ -704,7 +704,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
     {key:"id",label:"#",w:62,fixed:true,left:0},
     {key:"tipo",label:"Estado",w:136,fixed:true,left:62},
     {key:"avc_date",label:"Hora AVC",w:104,fixed:true,left:198},
-    {key:"sat_date",label:"Hora SAT",w:104},
+    {key:"sat_date",label:"Hora SP",w:104},
     {key:"delta_segundos",label:"Δ(s)",w:62},
     {key:"vehicle_type",label:"Tipo",w:116},
     {key:"axle_count",label:"Ejes AVC",w:78},
@@ -777,7 +777,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
   </style>
 </head>
 <body>
-  <h3>Conciliacion AVC/SAT - ${excelEscape(laneId)} - ${excelEscape(date)}</h3>
+  <h3>Conciliacion AVC/SP - ${excelEscape(laneId)} - ${excelEscape(date)}</h3>
   <div class="legend">${legendHtml}</div>
   <table>
     <thead><tr>${headerHtml}</tr></thead>
@@ -813,7 +813,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
         <input type="date" value={date} onChange={e=>{ didAutoReconRef.current=false; setDate(e.target.value); }} style={{...ldStyles.searchInput,width:140}}/>
         {satLanes.length>0 && (
           <select value={satLane} onChange={e=>{ setSatLane(e.target.value); didAutoReconRef.current=false; }}
-            style={{...ldStyles.searchInput,width:110,cursor:"pointer"}} title="Carril SAT (voie)">
+            style={{...ldStyles.searchInput,width:110,cursor:"pointer"}} title="Carril del Sistema de Peaje">
             {satLanes.map(v=><option key={v} value={v}>{v}</option>)}
           </select>
         )}
@@ -843,7 +843,7 @@ function LaneDetail({ laneId, onBack, initialFilter }) {
       {classFilter && (
         <div style={ldStyles.filterBanner}>
           <span>Revisión por clase: {classFilter.class_name || `Clase ${classFilter.class_id}`}</span>
-          <span style={{color:"#5b6a8a"}}>solo eventos con diferencia AVC/SAT</span>
+          <span style={{color:"#5b6a8a"}}>solo eventos con diferencia AVC/SP</span>
         </div>
       )}
 

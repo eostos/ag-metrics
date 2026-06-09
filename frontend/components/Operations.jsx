@@ -1,10 +1,10 @@
 // Operations modules — reports, alarms, notifications, and global settings
 const REPORT_TYPES = [
   {id:"daily", label:"Daily Toll Audit Report", help:"Resumen operativo diario por plaza y carriles seleccionados."},
-  {id:"comparison", label:"SAT vs AG-Metrics Comparison", help:"Compara transacciones SAT contra detecciones AG-Metrics."},
-  {id:"axle", label:"Axle Count Discrepancy Report", help:"Enfocado en diferencias de ejes entre AVC y SAT."},
+  {id:"comparison", label:"SP vs AG-Metrics Comparison", help:"Compara transacciones SP contra detecciones AG-Metrics."},
+  {id:"axle", label:"Axle Count Discrepancy Report", help:"Enfocado en diferencias de ejes entre AVC y SP."},
   {id:"class", label:"Vehicle Classification Mismatch Report", help:"Muestra diferencias entre clase detectada y clase cobrada."},
-  {id:"evasion", label:"Possible Evasion Report", help:"Lista eventos con detección sin transacción SAT asociada."},
+  {id:"evasion", label:"Possible Evasion Report", help:"Lista eventos con detección sin transacción SP asociada."},
 ];
 const REPORT_PERIODS = [
   {id:"Previous hour", help:"Usa la última hora cerrada para revisión rápida."},
@@ -22,20 +22,20 @@ const ALARM_EVENTS = [
   "Axle count mismatch",
   "Vehicle classification mismatch",
   "Possible evasion",
-  "Missing SAT transaction",
+  "Missing SP transaction",
   "Duplicate transaction",
   "Low confidence detection",
-  "SAT batch file not received",
+  "SP batch file not received",
   "Batch import failed",
   "High mismatch rate",
 ];
 const TRIGGER_EXAMPLES = [
-  "AG-Metrics axle count is different from SAT axle count",
+  "AG-Metrics axle count is different from SP axle count",
   "Axle count difference is greater than or equal to 1",
-  "Vehicle detected but no SAT transaction exists within +/- 10 seconds",
-  "AG-Metrics vehicle class is different from SAT vehicle class",
+  "Vehicle detected but no SP transaction exists within +/- 10 seconds",
+  "AG-Metrics vehicle class is different from SP vehicle class",
   "Detection confidence is below 75%",
-  "No SAT batch file received in the last 10 minutes",
+  "No SP batch file received in the last 10 minutes",
   "Mismatch rate is greater than 5% during the last hour",
 ];
 
@@ -205,9 +205,9 @@ function rptRateColor(v) { const n=Number(v||0); return n>=97?"#14965a":n>=93?"#
 
 const CLASS_NAMES_MAP = {1:"Auto",2:"C2",3:"C3",4:"C4",5:"C5",6:"C6",7:"C7",8:"C8",9:"C9+",10:"AR1",11:"AR2",12:"B2",13:"B3",14:"B4",15:"Moto"};
 const MOTIVE_LABELS_MAP = {
-  SAT_no_detecto:"AVC sin SAT en ventana", clase_distinta:"Clase incompatible",
+  SAT_no_detecto:"AVC sin SP en ventana", clase_distinta:"Clase incompatible",
   error_conteo_avc:"Error conteo AVC", moto_detectada_solo_por_avc:"Moto solo AVC",
-  AVC_no_detecto:"SAT sin AVC", moto_SAT_sin_AVC:"Moto SAT sin AVC", SAT_clase_indefinida:"SAT clase indefinida",
+  AVC_no_detecto:"SP sin AVC", moto_SAT_sin_AVC:"Moto SP sin AVC", SAT_clase_indefinida:"SP clase indefinida",
 };
 
 function openPrintableReport(form, preview, hourly, targetWin) {
@@ -364,7 +364,7 @@ tr:last-child td{border-bottom:0}
 <div class="header">
   <div class="logo-box"><img class="logo" src="/logo.jpeg" onerror="this.style.display='none'" alt="AG-metrics"/></div>
   <div>
-    <div class="brand">AG-metrics · Plataforma de Auditoría AVC/SAT</div>
+    <div class="brand">AG-metrics · Plataforma de Auditoría AVC/SP</div>
     <h1>${escapeHtml(form.name || form.type || "Reporte de Auditoría")}</h1>
     <div class="meta">
       ${escapeHtml(form.plaza || "")} &nbsp;·&nbsp;
@@ -380,17 +380,17 @@ tr:last-child td{border-bottom:0}
 <div class="kpis">
   <div class="kpi"><span>Total eventos</span><strong style="color:#111827">${opNum(totals.total)}</strong></div>
   <div class="kpi"><span>Coincidencias</span><strong style="color:#14965a">${opNum(totals.matched)}</strong></div>
-  <div class="kpi"><span>AVC sin SAT</span><strong style="color:#c2410c">${opNum(totals.avcOnly)}</strong></div>
-  <div class="kpi"><span>SAT sin AVC</span><strong style="color:#1d4ed8">${opNum(totals.satOnly)}</strong></div>
+  <div class="kpi"><span>AVC sin SP</span><strong style="color:#c2410c">${opNum(totals.avcOnly)}</strong></div>
+  <div class="kpi"><span>SP sin AVC</span><strong style="color:#1d4ed8">${opNum(totals.satOnly)}</strong></div>
   <div class="kpi"><span>Tasa detección</span><strong style="color:${rptRateColor(totals.matchRate)}">${rptPct(totals.matchRate)}</strong></div>
 </div>
 
 <!-- KPIs económicos -->
 <div class="kpis-money">
-  <div class="kpi" style="border-color:#bfdbfe"><span>SAT Facturado (real)</span><strong style="color:#1d4ed8">${rptMoney(sat_money)}</strong></div>
+  <div class="kpi" style="border-color:#bfdbfe"><span>SP Facturado (real)</span><strong style="color:#1d4ed8">${rptMoney(sat_money)}</strong></div>
   <div class="kpi" style="border-color:#fed7aa"><span>AVC Estimado (tarifas config.)</span><strong style="color:#c2410c">${rptMoney(avc_money)}</strong></div>
   <div class="kpi" style="border-color:${money_delta>0?"#fecaca":"#bbf7d0"}">
-    <span>Delta AVC − SAT</span>
+    <span>Delta AVC − SP</span>
     <strong style="color:${mdColor}">${money_delta>=0?"+":""}${rptMoney(money_delta)}</strong>
   </div>
 </div>
@@ -402,7 +402,7 @@ tr:last-child td{border-bottom:0}
     <div class="legend">
       <span><i class="dot" style="background:#22c97b"></i>Coincidencia</span>
       <span><i class="dot" style="background:#ff7e3f"></i>Solo AVC</span>
-      <span><i class="dot" style="background:#5b9cf6"></i>Solo SAT</span>
+      <span><i class="dot" style="background:#5b9cf6"></i>Solo SP</span>
     </div>
     ${laneBarRows || '<p style="color:#64748b;font-size:11px">Sin datos de detección</p>'}
   </div>
@@ -411,7 +411,7 @@ tr:last-child td{border-bottom:0}
     <div class="legend">
       <span><i class="dot" style="background:#22c97b"></i>Match</span>
       <span><i class="dot" style="background:#ff7e3f"></i>AVC</span>
-      <span><i class="dot" style="background:#5b9cf6"></i>SAT</span>
+      <span><i class="dot" style="background:#5b9cf6"></i>SP</span>
     </div>
     <div class="chart-wrap"><canvas id="hourlyChart"></canvas></div>
   </div>
@@ -431,9 +431,9 @@ tr:last-child td{border-bottom:0}
 
 <!-- Comparativa por clase -->
 <div class="section">
-  <h2>Comparativa por clase — AVC vs SAT</h2>
+  <h2>Comparativa por clase — AVC vs SP</h2>
   <table>
-    <thead><tr><th>Clase</th><th>AVC det.</th><th>SAT trans.</th><th>Delta det.</th><th>SAT Facturado</th><th>AVC Estimado</th><th>Delta ($)</th></tr></thead>
+    <thead><tr><th>Clase</th><th>AVC det.</th><th>SP trans.</th><th>Delta det.</th><th>SP Facturado</th><th>AVC Estimado</th><th>Delta ($)</th></tr></thead>
     <tbody>${classHtml}${classTotalHtml}</tbody>
   </table>
 </div>
@@ -442,13 +442,13 @@ tr:last-child td{border-bottom:0}
 <div class="section">
   <h2>Resumen por día y carril</h2>
   <table>
-    <thead><tr><th>Fecha</th><th>Carril</th><th>Total</th><th>Coincidencias</th><th>AVC sin SAT</th><th>SAT sin AVC</th><th>Detección</th><th>% Disc.</th><th>SAT $</th><th>AVC $</th></tr></thead>
+    <thead><tr><th>Fecha</th><th>Carril</th><th>Total</th><th>Coincidencias</th><th>AVC sin SP</th><th>SP sin AVC</th><th>Detección</th><th>% Disc.</th><th>SP $</th><th>AVC $</th></tr></thead>
     <tbody>${tableRows || '<tr><td colspan="10" style="color:#64748b;text-align:center;padding:16px">Sin datos</td></tr>'}</tbody>
   </table>
 </div>
 
 <div class="footer">
-  <span>AG-metrics · Reporte de Auditoría AVC/SAT</span>
+  <span>AG-metrics · Reporte de Auditoría AVC/SP</span>
   <span>${escapeHtml(form.template || "Standard PDF")} · ${escapeHtml(preview?.date_from || "")} – ${escapeHtml(preview?.date_to || "")}</span>
 </div>
 </div>
@@ -470,7 +470,7 @@ tr:last-child td{border-bottom:0}
       datasets: [
         { label:"Coincidencia", data: slice.map(function(h){return h.matched;}),  backgroundColor:"rgba(34,201,123,0.8)",  stack:"s" },
         { label:"Solo AVC",     data: slice.map(function(h){return h.avcOnly;}),  backgroundColor:"rgba(255,126,63,0.8)",  stack:"s" },
-        { label:"Solo SAT",     data: slice.map(function(h){return h.satOnly;}),  backgroundColor:"rgba(91,156,246,0.8)",  stack:"s" },
+        { label:"Solo SP",      data: slice.map(function(h){return h.satOnly;}),  backgroundColor:"rgba(91,156,246,0.8)",  stack:"s" },
       ]
     },
     options: {
@@ -515,7 +515,7 @@ function ReportBuilderPreview({ form, preview, loading, onRefresh }) {
         datasets:[
           {label:tr("Matched"), data:data.map(r=>r.matched || 0), backgroundColor:"rgba(34,201,123,0.75)"},
           {label:tr("AVC only"), data:data.map(r=>r.avcOnly || 0), backgroundColor:"rgba(255,126,63,0.75)"},
-          {label:tr("SAT only"), data:data.map(r=>r.satOnly || 0), backgroundColor:"rgba(91,156,246,0.75)"},
+          {label:tr("SP only"), data:data.map(r=>r.satOnly || 0), backgroundColor:"rgba(91,156,246,0.75)"},
           {label:tr("Axle errors"), data:data.map(r=>r.axleErr || 0), backgroundColor:"rgba(245,212,51,0.75)"},
         ],
       },
@@ -580,7 +580,7 @@ function ReportBuilderPreview({ form, preview, loading, onRefresh }) {
         {key:"total",label:"Total events",render:r=>opNum(r.total)},
         {key:"matched",label:"Matched",render:r=>opNum(r.matched)},
         {key:"avcOnly",label:"AVC only",render:r=>opNum(r.avcOnly)},
-        {key:"satOnly",label:"SAT only",render:r=>opNum(r.satOnly)},
+        {key:"satOnly",label:"SP only",render:r=>opNum(r.satOnly)},
         {key:"axleErr",label:"Axle errors",render:r=>opNum(r.axleErr)},
         {key:"discrepancyRate",label:"Discrepancy rate",render:r=>`${r.discrepancyRate || 0}%`},
       ]} rows={rows.slice(0, 20)} empty="No rows to include in the report"/>

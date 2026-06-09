@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AG-metrics — Plataforma de Auditoría AVC/SAT</title>
+  <title>AG-metrics — Plataforma de Auditoría AVC/SP</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -30,7 +30,7 @@
   <script>
     // Limpiar caché de Babel standalone para forzar recompilación con el nuevo diseño
     (function(){
-      var ver = "20260609a";
+      var ver = "20260609b";
       if (localStorage.getItem("agm_ver") !== ver) {
         Object.keys(localStorage).forEach(function(k){
           if (k.startsWith("babel-") || k.startsWith("__babel")) localStorage.removeItem(k);
@@ -43,8 +43,8 @@
   <script type="text/babel" src="components/Auth.jsx?v=20260525d"></script>
   <script type="text/babel" src="components/Layout.jsx?v=20260529a"></script>
   <script type="text/babel" src="components/Dashboard.jsx?v=20260525d"></script>
-  <script type="text/babel" src="components/LaneDetail.jsx?v=20260609a"></script>
-  <script type="text/babel" src="components/Config.jsx?v=20260609a"></script>
+  <script type="text/babel" src="components/LaneDetail.jsx?v=20260609b"></script>
+  <script type="text/babel" src="components/Config.jsx?v=20260609b"></script>
   <script type="text/babel" src="components/Reports.jsx?v=20260529a"></script>
   <script type="text/babel" src="components/Operations.jsx?v=20260529b"></script>
 
@@ -199,7 +199,7 @@
         "Loading...":"Cargando...",
         "Matched":"Coincidencias",
         "AVC only":"Solo AVC",
-        "SAT only":"Solo SAT",
+        "SP only":"Solo SP",
         "Axle errors":"Errores de ejes",
         "Total events":"Eventos totales",
         "Discrepancies":"Discrepancias",
@@ -221,7 +221,7 @@
         "Enabled":"Activado",
         "Disabled":"Desactivado",
         "Daily Toll Audit Report":"Reporte diario de auditoría de peaje",
-        "SAT vs AG-Metrics Comparison":"Comparativo SAT vs AG-Metrics",
+        "SP vs AG-Metrics Comparison":"Comparativo SP vs AG-Metrics",
         "Axle Count Discrepancy Report":"Reporte de discrepancias de ejes",
         "Vehicle Classification Mismatch Report":"Reporte de diferencias de clasificación",
         "Possible Evasion Report":"Reporte de posible evasión",
@@ -248,18 +248,18 @@
         "Solo los administradores pueden acceder a esta sección.":"Solo los administradores pueden acceder a esta sección.",
         "Salir":"Salir",
         "Fuentes AVC":"Fuentes AVC",
-        "Integración SAT":"Integración SAT",
+        "Sistema de Peaje":"Sistema de Peaje",
         "Sistema":"Sistema",
         "Usuarios y Permisos":"Usuarios y Permisos",
       },
       en: {
-        "Resumen de conciliación AVC/SAT por carril":"AVC/SAT reconciliation summary by lane",
+        "Resumen de conciliación AVC/SP por carril":"AVC/SP reconciliation summary by lane",
         "Detalle de reconciliación":"Reconciliation detail",
         "Acceso restringido":"Restricted access",
         "Solo los administradores pueden acceder a esta sección.":"Only administrators can access this section.",
         "Salir":"Logout",
         "Fuentes AVC":"AVC Sources",
-        "Integración SAT":"SAT Integration",
+        "Sistema de Peaje":"Toll System Integration",
         "Sistema":"System",
         "Usuarios y Permisos":"Users and Permissions",
       },
@@ -279,7 +279,7 @@
     };
 
     const PAGE_TITLES = {
-      dashboard: { title: "Dashboard", subtitle: "Resumen de conciliación AVC/SAT por carril" },
+      dashboard: { title: "Dashboard", subtitle: "Resumen de conciliación AVC/SP por carril" },
       reports:   { title: "Reports",  subtitle: "Report configuration, templates and history" },
       alarms:    { title: "Alarms", subtitle: "Alarm rules, open alarms and history" },
       notifications: { title: "Notifications", subtitle: "Email notification history and contact groups" },

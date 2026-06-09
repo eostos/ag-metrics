@@ -431,12 +431,12 @@ def _auto_cols_sat(df: pd.DataFrame) -> Dict[str, str]:
 def _load_sat_merged(day_str: str) -> pd.DataFrame:
     mp = os.path.join(MERGED_DIR, f"SAT-TEXCOCO-{day_str}-MERGED.json")
     if not os.path.exists(mp):
-        raise FileNotFoundError(f"SAT MERGED no encontrado: {mp}")
+        raise FileNotFoundError(f"Archivo consolidado SP no encontrado: {mp}")
     with open(mp, "r", encoding="utf-8") as fh:
         data = json.load(fh)
     txns = data.get("transactions", [])
     if not txns:
-        raise ValueError("El archivo SAT MERGED no tiene transacciones")
+        raise ValueError("El archivo consolidado SP no tiene transacciones")
     return pd.DataFrame(txns)
 
 def _recon_summary(result: pd.DataFrame) -> Dict:
@@ -468,7 +468,7 @@ def _reconcile_date_cache(day_str: str) -> None:
         sat_df = _load_sat_merged(day_str)
         sc = _auto_cols_sat(sat_df)
         if not all(sc.values()):
-            _set_processing_status(fecha, "error", "Columnas SAT incompletas")
+            _set_processing_status(fecha, "error", "Columnas SP incompletas")
             return
 
         sat_lanes = sorted(sat_df[sc["voie"]].dropna().astype(str).str.strip().unique().tolist())
@@ -712,8 +712,8 @@ def _report_pdf_bytes(title: str, report: Dict[str, Any]) -> bytes:
         "Indicadores globales",
         f"Total eventos: {totals.get('total', 0)}",
         f"Coincidencias: {totals.get('matched', 0)}",
-        f"AVC sin SAT: {totals.get('avcOnly', 0)}",
-        f"SAT sin AVC: {totals.get('satOnly', 0)}",
+        f"AVC sin SP: {totals.get('avcOnly', 0)}",
+        f"SP sin AVC: {totals.get('satOnly', 0)}",
         f"Errores ejes: {totals.get('axleErr', 0)}",
         f"Tasa deteccion: {totals.get('matchRate', 0)}%",
         f"Discrepancias: {totals.get('discrepancyCount', 0)} ({totals.get('discrepancyRate', 0)}%)",
@@ -732,7 +732,7 @@ def _report_pdf_bytes(title: str, report: Dict[str, Any]) -> bytes:
     for row in (report.get("rows") or [])[:18]:
         lines.append(
             f"{row.get('date')} | {row.get('lane')} | total {row.get('total')} | "
-            f"match {row.get('matchRate')}% | AVC {row.get('avcOnly')} | SAT {row.get('satOnly')} | ejes {row.get('axleErr')}"
+            f"match {row.get('matchRate')}% | AVC {row.get('avcOnly')} | SP {row.get('satOnly')} | ejes {row.get('axleErr')}"
         )
 
     wrapped: List[str] = []
@@ -845,10 +845,10 @@ def _designed_report_html_bytes(form: Dict[str, Any], report: Dict[str, Any]) ->
         8:"C8",9:"C9+",10:"AR1",11:"AR2",12:"B2",13:"B3",14:"B4",15:"Moto",
     }
     MOTIVE_LABELS = {
-        "SAT_no_detecto":"AVC sin SAT en ventana","clase_distinta":"Clase incompatible",
+        "SAT_no_detecto":"AVC sin SP en ventana","clase_distinta":"Clase incompatible",
         "error_conteo_avc":"Error conteo AVC","moto_detectada_solo_por_avc":"Moto solo AVC",
-        "AVC_no_detecto":"SAT sin AVC","moto_SAT_sin_AVC":"Moto SAT sin AVC",
-        "SAT_clase_indefinida":"SAT clase indefinida",
+        "AVC_no_detecto":"SP sin AVC","moto_SAT_sin_AVC":"Moto SP sin AVC",
+        "SAT_clase_indefinida":"SP clase indefinida",
     }
     lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
     rows = [r for r in report.get("rows", []) if not lanes or r.get("lane") in lanes]
@@ -1062,7 +1062,7 @@ def _designed_report_html_bytes(form: Dict[str, Any], report: Dict[str, Any]) ->
 <div class="header">
   <div class="logo-box"><img class="logo" src="{logo_data}" alt="AG-metrics"/></div>
   <div>
-    <div class="brand">AG-metrics · Plataforma de Auditoría AVC/SAT</div>
+    <div class="brand">AG-metrics · Plataforma de Auditoría AVC/SP</div>
     <h1>{_html_escape(form.get('name') or form.get('type') or 'Reporte de Auditoría')}</h1>
     <div class="meta">{_html_escape(form.get('plaza') or '')} &nbsp;·&nbsp; {_html_escape(report.get('date_from',''))} al {_html_escape(report.get('date_to',''))}<br/>
     Carriles: {_html_escape(', '.join(lanes) if lanes else 'Todos los disponibles')} &nbsp;·&nbsp; Generado: {_html_escape(_now())}</div>
@@ -1072,22 +1072,22 @@ def _designed_report_html_bytes(form: Dict[str, Any], report: Dict[str, Any]) ->
 <div class="kpis">
   <div class="kpi"><span>Total eventos</span><strong style="color:#111827">{n(totals.get('total'))}</strong></div>
   <div class="kpi"><span>Coincidencias</span><strong style="color:#14965a">{n(totals.get('matched'))}</strong></div>
-  <div class="kpi"><span>AVC sin SAT</span><strong style="color:#c2410c">{n(totals.get('avcOnly'))}</strong></div>
-  <div class="kpi"><span>SAT sin AVC</span><strong style="color:#1d4ed8">{n(totals.get('satOnly'))}</strong></div>
+  <div class="kpi"><span>AVC sin SP</span><strong style="color:#c2410c">{n(totals.get('avcOnly'))}</strong></div>
+  <div class="kpi"><span>SP sin AVC</span><strong style="color:#1d4ed8">{n(totals.get('satOnly'))}</strong></div>
   <div class="kpi"><span>Tasa detección</span><strong style="color:{rate_color(totals.get('matchRate'))}">{pct(totals.get('matchRate'))}</strong></div>
 </div>
 <div class="kpis-money">
-  <div class="kpi" style="border-color:#bfdbfe"><span>SAT Facturado (real)</span><strong style="color:#1d4ed8">{money(totals.get('sat_money'))}</strong></div>
+  <div class="kpi" style="border-color:#bfdbfe"><span>SP Facturado (real)</span><strong style="color:#1d4ed8">{money(totals.get('sat_money'))}</strong></div>
   <div class="kpi" style="border-color:#fed7aa"><span>AVC Estimado (tarifas config.)</span><strong style="color:#c2410c">{money(totals.get('avc_money'))}</strong></div>
-  <div class="kpi" style="border-color:{'#fecaca' if money_delta_val>0 else '#bbf7d0'}"><span>Delta AVC − SAT</span><strong style="color:{money_delta_color}">{("+" if money_delta_val>=0 else "")}{money(money_delta_val)}</strong></div>
+  <div class="kpi" style="border-color:{'#fecaca' if money_delta_val>0 else '#bbf7d0'}"><span>Delta AVC − SP</span><strong style="color:{money_delta_color}">{("+" if money_delta_val>=0 else "")}{money(money_delta_val)}</strong></div>
 </div>
 <div class="two-col">
   <div class="section"><h2>Detección por carril / día</h2>
-    <div class="legend"><span><i class="dot" style="background:#22c97b"></i>Coincidencia</span><span><i class="dot" style="background:#ff7e3f"></i>Solo AVC</span><span><i class="dot" style="background:#5b9cf6"></i>Solo SAT</span></div>
+    <div class="legend"><span><i class="dot" style="background:#22c97b"></i>Coincidencia</span><span><i class="dot" style="background:#ff7e3f"></i>Solo AVC</span><span><i class="dot" style="background:#5b9cf6"></i>Solo SP</span></div>
     {bar_rows_html or '<p style="color:#64748b;font-size:10px;">Sin datos</p>'}
   </div>
   <div class="section"><h2>Flujo de eventos por hora</h2>
-    <div class="legend"><span><i class="dot" style="background:#22c97b"></i>Match</span><span><i class="dot" style="background:#ff7e3f"></i>AVC</span><span><i class="dot" style="background:#5b9cf6"></i>SAT</span></div>
+    <div class="legend"><span><i class="dot" style="background:#22c97b"></i>Match</span><span><i class="dot" style="background:#ff7e3f"></i>AVC</span><span><i class="dot" style="background:#5b9cf6"></i>SP</span></div>
     {hourly_html}
   </div>
 </div>
@@ -1095,16 +1095,16 @@ def _designed_report_html_bytes(form: Dict[str, Any], report: Dict[str, Any]) ->
   <div class="section"><h2>Motivos de discrepancia</h2>{motives_html}</div>
   <div class="section"><h2>Carriles con mayor discrepancia</h2><table><tbody>{worst_html}</tbody></table></div>
 </div>
-<div class="section"><h2>Comparativa por clase — AVC vs SAT</h2>
-  <table><thead><tr><th>Clase</th><th>AVC det.</th><th>SAT trans.</th><th>Delta</th><th>SAT Facturado</th><th>AVC Estimado</th><th>Delta ($)</th></tr></thead>
+<div class="section"><h2>Comparativa por clase — AVC vs SP</h2>
+  <table><thead><tr><th>Clase</th><th>AVC det.</th><th>SP trans.</th><th>Delta</th><th>SP Facturado</th><th>AVC Estimado</th><th>Delta ($)</th></tr></thead>
   <tbody>{class_rows_html}</tbody></table>
 </div>
 <div class="section"><h2>Resumen por día y carril</h2>
-  <table><thead><tr><th>Fecha</th><th>Carril</th><th>Total</th><th>Coincidencias</th><th>AVC sin SAT</th><th>SAT sin AVC</th><th>Detección</th><th>% Disc.</th><th>SAT $</th><th>AVC $</th></tr></thead>
+  <table><thead><tr><th>Fecha</th><th>Carril</th><th>Total</th><th>Coincidencias</th><th>AVC sin SP</th><th>SP sin AVC</th><th>Detección</th><th>% Disc.</th><th>SP $</th><th>AVC $</th></tr></thead>
   <tbody>{table_rows}</tbody></table>
 </div>
 <div class="footer">
-  <span>AG-metrics · Reporte de Auditoría AVC/SAT</span>
+  <span>AG-metrics · Reporte de Auditoría AVC/SP</span>
   <span>{_html_escape(form.get('template') or 'Standard PDF')} · {_html_escape(report.get('date_from',''))} – {_html_escape(report.get('date_to',''))}</span>
 </div>
 </div></body></html>"""
@@ -1158,12 +1158,12 @@ def _designed_report_pdf_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> 
         "manual": "Solo manual" if spanish else "Manual only",
         "results": "Resultados por carril y día" if spanish else "Results by lane and day",
         "avc_only": "Solo AVC" if spanish else "AVC only",
-        "sat_only": "Solo SAT" if spanish else "SAT only",
+        "sat_only": "Solo SP" if spanish else "SP only",
         "detail": "Tabla de detalle" if spanish else "Detail table",
         "date": "Fecha" if spanish else "Date",
         "lane": "Carril" if spanish else "Lane",
         "match": "Match" if spanish else "Match",
-        "footer": "AG-metrics - Reporte de Auditoría AVC/SAT" if spanish else "AG-metrics - AVC/SAT Audit Report",
+        "footer": "AG-metrics - Reporte de Auditoría AVC/SP" if spanish else "AG-metrics - AVC/SP Audit Report",
     }
     lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
     rows = [r for r in report.get("rows", []) if not lanes or r.get("lane") in lanes]
@@ -1269,7 +1269,7 @@ def _designed_report_pdf_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> 
         y -= 18
 
     text(labels["detail"], 46, 230, 12)
-    headers = [labels["date"], labels["lane"], "Total", labels["match"], "AVC", "SAT", "Ejes", "% Disc."]
+    headers = [labels["date"], labels["lane"], "Total", labels["match"], "AVC", "SP", "Ejes", "% Disc."]
     widths = [60, 118, 45, 45, 45, 45, 45, 55]
     x = 46
     fill(0.95, 0.96, 0.98, 46, 210, 468, 16)
@@ -1549,7 +1549,7 @@ def _snapshot_unix_value(value: str, timezone_name: str) -> str:
         return raw
     parsed = parse_date(raw)
     if pd.isna(parsed):
-        raise HTTPException(400, "Timestamp SAT inválido")
+        raise HTTPException(400, "Timestamp SP inválido")
     dt = parsed.to_pydatetime() if isinstance(parsed, pd.Timestamp) else parsed
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=get_event_tz(timezone_name))
@@ -1704,7 +1704,7 @@ def get_sat_evidence_photo(source_id: int, avc_lane: str, sat_timestamp: str,
     evidence = snapshot["evidence"]
     photo_url = str(evidence.get("photo_url") or "")
     if not evidence.get("photo_available") or not photo_url:
-        raise HTTPException(404, "Alice Guardian no encontró fotografía para esta transacción SAT")
+        raise HTTPException(404, "Alice Guardian no encontró fotografía para esta transacción SP")
     try:
         photo_response = _requests.get(
             photo_url, timeout=snapshot["timeout"], verify=snapshot["verify_ssl"]
@@ -2208,7 +2208,7 @@ async def run_reconcile(request: Request, user=Depends(_get_user)):
 
 @app.get("/api/class-summary")
 def get_class_summary(query_date: str = "", user=Depends(_get_user)):
-    """Distribución de clases AVC vs SAT desde el caché de conciliación."""
+    """Distribución de clases AVC vs SP desde el caché de conciliación."""
     if query_date:
         d = datetime.strptime(query_date, "%Y-%m-%d").date()
     else:
@@ -2268,7 +2268,7 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
                         avc_counts[avc_cls] = avc_counts.get(avc_cls, 0) + 1
                 except Exception:
                     pass
-            # Clase SAT — de filas MATCH y SAT
+            # Clase SP — de filas MATCH y SAT
             if tipo in ("MATCH", "SAT"):
                 try:
                     sc = int(float(ev.get("id_classe")     or 0))
@@ -2318,7 +2318,7 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
             "avc":      avc_counts.get(cls, 0),
             "sat":      sat_counts.get(cls, 0),
             "tariff":   round(configured_tariffs.get(cls, tariffs.get(cls, 0.0)), 2),
-            "tariff_source": "AVC configurada" if cls in configured_tariffs else "SAT frecuente",
+            "tariff_source": "AVC configurada" if cls in configured_tariffs else "SP frecuente",
             "avc_amount": round(avc_counts.get(cls, 0) * configured_tariffs.get(cls, tariffs.get(cls, 0.0)), 2),
             "sat_amount": round(sat_amounts.get(cls, 0.0), 2),
             "amount_delta": round(
@@ -2359,7 +2359,7 @@ def get_class_summary(query_date: str = "", user=Depends(_get_user)):
             "sat_amount": round(total_sat_amount, 2),
             "amount_delta": round(total_avc_amount - total_sat_amount, 2),
             "currency": "MXN",
-            "method": "SAT real por sat_prix; AVC estimado con tarifas AVC configuradas. Si falta una clase, usa la tarifa SAT mas frecuente como respaldo.",
+            "method": "SP real por sat_prix; AVC estimado con tarifas AVC configuradas. Si falta una clase, usa la tarifa SP mas frecuente como respaldo.",
         },
     }
 
@@ -3086,7 +3086,7 @@ async def merge_sat(request: Request, user=Depends(_get_user)):
     day_str = body.get("day", date.today().strftime("%Y%m%d"))
     fecha = datetime.strptime(day_str, "%Y%m%d").date().isoformat()
     os.makedirs(MERGED_DIR, exist_ok=True)
-    _set_processing_status(fecha, "merging_sat", "Fusionando archivos SAT")
+    _set_processing_status(fecha, "merging_sat", "Fusionando archivos SP")
 
     pattern = os.path.join(WATCH_DIR, f"SAT-TEXCOCO-{day_str}*.json")
     files   = sorted([f for f in glob.glob(pattern)
@@ -3130,7 +3130,7 @@ async def merge_sat(request: Request, user=Depends(_get_user)):
     if added:
         _start_reconcile_date_cache(day_str)
     else:
-        _set_processing_status(fecha, "ready", "SAT sin cambios nuevos")
+        _set_processing_status(fecha, "ready", "SP sin cambios nuevos")
     return {"ok":True,"added":added,"skipped":skipped,"total":len(merged["transactions"]),"path":mp}
 
 

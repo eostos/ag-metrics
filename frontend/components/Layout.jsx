@@ -95,7 +95,7 @@ function Sidebar({ currentView, onNavigate, user, collapsed, setCollapsed }) {
                 <div style={layoutStyles.sidebarLogoText}>AG-metrics</div>
                 <div style={{fontSize:9, color:"#4a5d7a", letterSpacing:1.5,
                   textTransform:"uppercase", marginTop:2, whiteSpace:"nowrap"}}>
-                  Plataforma AVC / SAT
+                  Plataforma AVC / SP
                 </div>
               </div>
             </div>

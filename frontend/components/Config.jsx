@@ -360,12 +360,12 @@ function SATConfig() {
           <div>
             <div style={{fontSize:13,fontWeight:600,color:"#e8edf5",marginBottom:5}}>Tarifas AVC para Impacto Económico</div>
             <div style={{fontSize:12,color:"#5b6a8a",lineHeight:1.45}}>
-              Estas tarifas estiman el monto AVC por clase en el Dashboard. SAT conserva su monto real desde sat_prix.
+              Estas tarifas estiman el monto AVC por clase en el Dashboard. SP conserva su monto real desde sat_prix.
             </div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <button onClick={copyAllSatTariffs} style={cfgStyles.actionBtn}>
-              Copiar SAT a AVC
+              Copiar SP a AVC
             </button>
             {tariffMsg && (
               <span style={{fontSize:11,color:tariffMsg.startsWith("✓")?"#22c97b":"#ff4c6a"}}>{tariffMsg}</span>
@@ -377,7 +377,7 @@ function SATConfig() {
           </div>
         </div>
         <div style={{fontSize:11,color:"#5b6a8a",marginBottom:12}}>
-          SAT observado desde <span style={{color:"#8a9ab5",fontFamily:"monospace"}}>{satTariffs.source_file || "sin MERGED"}</span>
+          SP observado desde <span style={{color:"#8a9ab5",fontFamily:"monospace"}}>{satTariffs.source_file || "sin MERGED"}</span>
           {satTariffs.day ? ` · ${satTariffs.day}` : ""}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:10}}>
@@ -403,7 +403,7 @@ function SATConfig() {
                   </div>
                 </div>
                 <div>
-                  <div style={{fontSize:10,color:"#5b6a8a"}}>SAT automática</div>
+                  <div style={{fontSize:10,color:"#5b6a8a"}}>SP automática</div>
                   <div style={{fontSize:13,fontWeight:800,color:satVal?"#8bbcff":"#5b6a8a"}}>
                     {satVal ? moneyFmt(satVal) : "—"}
                   </div>
@@ -422,7 +422,7 @@ function SATConfig() {
                   </span>
                   {satVal > 0 && (
                     <button onClick={()=>copySatTariff(id)} style={{...cfgStyles.actionBtn,fontSize:10,padding:"4px 7px"}}>
-                      Usar SAT
+                      Usar SP
                     </button>
                   )}
                 </div>
@@ -487,7 +487,7 @@ function SATConfig() {
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
         {days.length===0 && (
           <div style={{textAlign:"center",padding:"32px 0",color:"#5b6a8a",fontSize:13}}>
-            {dirInfo ? "Sin archivos SAT en el directorio." : "Cargando…"}
+            {dirInfo ? "Sin archivos SP en el directorio." : "Cargando…"}
           </div>
         )}
 
@@ -1124,7 +1124,7 @@ function SistemaConfig() {
       <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
         <div style={{fontSize:13,fontWeight:600,color:"#e8edf5",marginBottom:6}}>Zona Horaria del Sistema</div>
         <div style={{fontSize:12,color:"#5b6a8a",marginBottom:14}}>
-          Todos los timestamps AVC y SAT se normalizarán a esta zona horaria para comparación y visualización.
+          Todos los timestamps AVC y SP se normalizarán a esta zona horaria para comparación y visualización.
         </div>
         <div style={{maxWidth:440}}>
           <label style={cfgStyles.label}>Zona horaria</label>
@@ -1138,15 +1138,15 @@ function SistemaConfig() {
       {/* ── Mapeo de carriles ── */}
       <div style={{background:"#080d1a",border:"1px solid #1e2535",borderRadius:10,padding:"16px 20px",marginBottom:20}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
-          <div style={{fontSize:13,fontWeight:600,color:"#e8edf5"}}>Mapeo de Carriles AVC ↔ SAT</div>
+          <div style={{fontSize:13,fontWeight:600,color:"#e8edf5"}}>Mapeo de Carriles AVC ↔ SP</div>
           {satVoies.length===0 && (
             <span style={{fontSize:10,color:"#5b6a8a",background:"#0d1525",padding:"3px 8px",borderRadius:4}}>
-              💡 Escribe el voie SAT manualmente
+              Escribe el carril SP manualmente
             </span>
           )}
         </div>
         <div style={{fontSize:12,color:"#5b6a8a",marginBottom:16}}>
-          Asocia cada carril AVC con su voie SAT correspondiente.
+          Asocia cada carril AVC con su carril del Sistema de Peaje correspondiente.
           Se aplica automáticamente al abrir un carril para conciliar.
         </div>
 
@@ -1154,7 +1154,7 @@ function SistemaConfig() {
         <div style={{display:"grid",gridTemplateColumns:"1fr 28px 1fr 32px",gap:8,
           padding:"6px 12px",background:"#0d1525",borderRadius:6,marginBottom:8,
           fontSize:10,color:"#5b6a8a",fontWeight:600,letterSpacing:0.5,textTransform:"uppercase"}}>
-          <span>Carril AVC</span><span/><span>Voie SAT</span><span/>
+          <span>Carril AVC</span><span/><span>Carril SP</span><span/>
         </div>
 
         <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -1203,7 +1203,7 @@ function SistemaConfig() {
             ) : (
               <input value={newSat} onChange={e=>setNewSat(e.target.value)}
                 onKeyDown={e=>{ if(e.key==="Enter") addRow(); }}
-                placeholder="Voie SAT (ej: 9)"
+                placeholder="Carril SP (ej: 9)"
                 style={{...cfgStyles.input,padding:"7px 10px",fontSize:12}}/>
             )}
             <button onClick={addRow} disabled={!newAvc.trim()}
@@ -1451,8 +1451,8 @@ function ReportEmailSettings() {
 }
 
 const CONFIG_TABS = [
-  { id:"fuentes", label:"Fuentes AVC",          icon:"📡" },
-  { id:"sat",     label:"Integración SAT",      icon:"💳" },
+  { id:"fuentes", label:"Fuentes AVC",          icon:"📷" },
+  { id:"sat",     label:"Sistema de Peaje",     icon:"🚧" },
   { id:"sistema", label:"Sistema",              icon:"⚙️" },
   { id:"users",   label:"Usuarios y Permisos",  icon:"👥" },
 ];
@@ -1487,8 +1487,8 @@ function ConfigScreen() {
         </div>
         <div style={{fontSize:12, color:"#5b6a8a", marginBottom:24}}>
           {activeTab==="fuentes"&&"Sistemas AVC conectados — PostgreSQL/SSH o Alice API REST"}
-          {activeTab==="sat"&&"Fuente de datos del Sistema de Administración de Tráfico"}
-          {activeTab==="sistema"&&"Zona horaria, mapeo de carriles AVC ↔ SAT y parámetros globales"}
+          {activeTab==="sat"&&"Integración con el Sistema de Peaje (SP)"}
+          {activeTab==="sistema"&&"Zona horaria, mapeo de carriles AVC ↔ SP y parámetros globales"}
           {activeTab==="users"&&"Gestión de usuarios y niveles de acceso"}
         </div>
         {tabContent[activeTab]}
