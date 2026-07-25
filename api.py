@@ -54,6 +54,8 @@ MERGED_DIR = os.path.expanduser("~/sat_merged")
 WATCH_DIR  = "/home/sftpuser/uploads"
 AVC_SYNC_INTERVAL_SECONDS = int(os.environ.get("AUDITEC_AVC_SYNC_INTERVAL_SECONDS", "300"))
 AVC_SYNC_ENABLED = os.environ.get("AUDITEC_AVC_SYNC_ENABLED", "1").lower() not in ("0", "false", "no")
+RECONCILE_AUTO_INTERVAL_SECONDS = int(os.environ.get("AUDITEC_RECONCILE_INTERVAL_SECONDS", "300"))
+RECONCILE_AUTO_DAYS_BACK = int(os.environ.get("AUDITEC_RECONCILE_DAYS_BACK", "3"))
 
 app = FastAPI(title="AG-metrics API", docs_url="/api/docs")
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
@@ -704,6 +706,8 @@ def _default_report_email_settings() -> Dict[str, Any]:
             "weekly_enabled": False,
             "weekly_day": "monday",
             "weekly_time": "07:00",
+            "monthly_enabled": False,
+            "monthly_time": "07:00",
             "timezone": cfg.get("timezone") or "America/Mexico_City",
         },
     }
@@ -1156,65 +1160,306 @@ def _jpeg_dimensions(data: bytes) -> Optional[tuple]:
     return None
 
 
-def _designed_report_pdf_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> bytes:
+def _designed_report_pdf_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> bytes:  # noqa: C901
     lang_raw = str(form.get("language") or "").lower()
     if not lang_raw:
         cfg = load_saved_settings()
         lang_raw = str(cfg.get("ui_language") or "").lower()
     spanish = lang_raw.startswith("es") or "spanish" in lang_raw or "español" in lang_raw
-    labels = {
-        "brand": "Plataforma de Auditoría AG-metrics" if spanish else "AG-metrics Toll Audit Platform",
+
+    L = {
+        "brand":     "Plataforma de Auditoría AG-metrics" if spanish else "AG-metrics Toll Audit Platform",
         "generated": "Generado" if spanish else "Generated",
-        "total": "Eventos totales" if spanish else "Total events",
-        "matched": "Coincidencias" if spanish else "Matched",
-        "discrepancies": "Discrepancias" if spanish else "Discrepancies",
-        "detection": "Tasa de detección" if spanish else "Detection rate",
-        "axle": "Errores de ejes" if spanish else "Axle errors",
-        "class": "Clase distinta" if spanish else "Class mismatch",
-        "scope": "Alcance del reporte" if spanish else "Report scope",
-        "lanes": "Carriles" if spanish else "Lanes",
-        "all_lanes": "Todos los carriles disponibles" if spanish else "All available lanes",
-        "frequency": "Frecuencia" if spanish else "Frequency",
-        "manual": "Solo manual" if spanish else "Manual only",
-        "results": "Resultados por carril y día" if spanish else "Results by lane and day",
-        "avc_only": "Solo AVC" if spanish else "AVC only",
-        "sat_only": "Solo SP" if spanish else "SP only",
-        "detail": "Tabla de detalle" if spanish else "Detail table",
-        "date": "Fecha" if spanish else "Date",
-        "lane": "Carril" if spanish else "Lane",
-        "match": "Match" if spanish else "Match",
-        "footer": "AG-metrics - Reporte de Auditoría AVC/SP" if spanish else "AG-metrics - AVC/SP Audit Report",
+        "total":     "Eventos totales" if spanish else "Total events",
+        "matched":   "Coincidencias" if spanish else "Matched",
+        "disc":      "Discrepancias" if spanish else "Discrepancies",
+        "det":       "Tasa de detección" if spanish else "Detection rate",
+        "scope":     "Alcance" if spanish else "Scope",
+        "all_lanes": "Todos los carriles" if spanish else "All lanes",
+        "results":   "Distribución por carril y día" if spanish else "Results by lane and day",
+        "avc_only":  "Solo AVC" if spanish else "AVC only",
+        "sat_only":  "Solo SP" if spanish else "SP only",
+        "evolution": "Evolución diaria" if spanish else "Daily evolution",
+        "cls_comp":  "Comparativa por clase  AVC vs SP" if spanish else "AVC vs SP by vehicle class",
+        "detail":    "Detalle por fecha y carril" if spanish else "Detail by date and lane",
+        "date":      "Fecha" if spanish else "Date",
+        "lane":      "Carril" if spanish else "Lane",
+        "match":     "Match" if spanish else "Match",
+        "footer":    "AG-metrics — Reporte de Auditoría AVC/SP" if spanish else "AG-metrics — AVC/SP Audit Report",
+        "connector": "a" if spanish else "to",
     }
+
+    CLASS_NAMES_PDF = {
+        1:"Auto", 2:"C2", 3:"C3", 4:"C4", 5:"C5", 6:"C6", 7:"C7",
+        8:"C8", 9:"C9+", 10:"AR1", 11:"AR2", 12:"B2", 13:"B3", 14:"B4", 15:"Moto",
+    }
+
     lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
     rows = [r for r in report.get("rows", []) if not lanes or r.get("lane") in lanes]
     rows = _report_rows_for_type(rows, form.get("type") or "")
+    rows_sorted = sorted(rows, key=lambda r: (r.get("date") or "", r.get("lane") or ""))
+
     totals = {
-        "total": sum(int(r.get("total") or 0) for r in rows),
+        "total":   sum(int(r.get("total") or 0) for r in rows),
         "matched": sum(int(r.get("matched") or 0) for r in rows),
         "avcOnly": sum(int(r.get("avcOnly") or 0) for r in rows),
         "satOnly": sum(int(r.get("satOnly") or 0) for r in rows),
-        "axleErr": sum(int(r.get("axleErr") or 0) for r in rows),
-        "classMismatch": sum(int(r.get("classMismatch") or 0) for r in rows),
     }
-    totals["discrepancy"] = totals["avcOnly"] + totals["satOnly"] + totals["axleErr"]
+    totals["discrepancy"] = totals["avcOnly"] + totals["satOnly"]
     totals["matchRate"] = round((totals["total"] - totals["satOnly"]) / max(totals["total"], 1) * 100, 1)
     max_total = max([int(r.get("total") or 0) for r in rows] or [1])
 
+    # Day-over-day evolution
+    _dm: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        d = r.get("date") or ""
+        if not d:
+            continue
+        _dm.setdefault(d, {"total": 0, "matched": 0, "avcOnly": 0, "satOnly": 0})
+        for k in ("total", "matched", "avcOnly", "satOnly"):
+            _dm[d][k] += int(r.get(k) or 0)
+    daily: List[Dict[str, Any]] = []
+    for d in sorted(_dm.keys()):
+        t = dict(_dm[d]); t["date"] = d
+        t["matchRate"] = round((t["total"] - t["satOnly"]) / max(t["total"], 1) * 100, 1)
+        daily.append(t)
+    for i, day in enumerate(daily):
+        prev = daily[i - 1] if i > 0 else None
+        day["dAvc"]  = day["avcOnly"] - prev["avcOnly"] if prev else None
+        day["dSat"]  = day["satOnly"] - prev["satOnly"] if prev else None
+        day["dRate"] = round(day["matchRate"] - prev["matchRate"], 1) if prev else None
+
+    class_breakdown = report.get("class_breakdown") or []
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
     def n(value: Any) -> str:
+        try: return f"{int(float(value or 0)):,}"
+        except Exception: return str(value or 0)
+
+    def ds(val: Any) -> str:
+        if val is None: return "-"
         try:
-            return f"{int(value):,}"
+            v = int(val); return f"+{v:,}" if v > 0 else f"{v:,}"
+        except Exception: return "-"
+
+    def dsr(val: Any) -> str:
+        if val is None: return "-"
+        try:
+            v = float(val); return f"+{v:.1f}%" if v > 0 else f"{v:.1f}%"
+        except Exception: return "-"
+
+    def money_s(val: Any) -> str:
+        try: return f"${float(val or 0):,.2f}"
+        except Exception: return "$0.00"
+
+    def rate_col(rate: Any):
+        try:
+            v = float(rate or 0)
+            return (0.08, 0.59, 0.35) if v >= 97 else (0.72, 0.54, 0.0) if v >= 93 else (0.85, 0.18, 0.33)
         except Exception:
-            return str(value or 0)
+            return (0.39, 0.45, 0.55)
 
-    cmds: List[str] = []
+    # ── Drawing primitives ────────────────────────────────────────────────────
+    p1: List[str] = []
+    p2: List[str] = []
+    RH = 14   # row height (data rows)
+    HH = 16   # header row height
 
-    def fill(r: float, g: float, b: float, x: float, y: float, w: float, h: float) -> None:
+    def _fill(cmds: List[str], r: float, g: float, b: float, x: float, y: float, w: float, h: float) -> None:
         cmds.append(f"{r} {g} {b} rg {x} {y} {w} {h} re f")
 
-    def text(value: Any, x: float, y: float, size: int = 10, color=(0.07, 0.09, 0.14), font="F1") -> None:
+    def _text(cmds: List[str], value: Any, x: float, y: float, size: int = 8,
+               color=(0.07, 0.09, 0.14)) -> None:
         r, g, b = color
-        cmds.append(f"{r} {g} {b} rg BT /{font} {size} Tf {x} {y} Td ({_pdf_escape(value)}) Tj ET")
+        cmds.append(f"{r} {g} {b} rg BT /F1 {size} Tf {x} {y} Td ({_pdf_escape(value)}) Tj ET")
 
+    def _sec(cmds: List[str], title: str, y: float, w: float = 502) -> None:
+        """Dark band section header."""
+        _fill(cmds, 0.09, 0.12, 0.21, 46, y, w, 16)
+        _text(cmds, title, 52, y + 5, 9, (0.85, 0.91, 1.0))
+
+    def _tbl_hdr(cmds: List[str], y: float, cols: list, w: float = 502) -> None:
+        """Light blue column header row + text labels."""
+        _fill(cmds, 0.88, 0.92, 0.98, 46, y, w, HH)
+        for lbl, hx in cols:
+            _text(cmds, lbl, hx + 3, y + 5, 7, (0.25, 0.30, 0.42))
+
+    def _row(cmds: List[str], idx: int, y: float, w: float = 502) -> None:
+        if idx % 2 == 0:
+            _fill(cmds, 0.96, 0.97, 1.0, 46, y, w, RH)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PAGE 1 — Cover, KPIs, scope, stacked bar chart
+    # ═══════════════════════════════════════════════════════════════════════
+    _fill(p1, 0.95, 0.97, 1.0, 0, 0, 612, 792)
+    _fill(p1, 1.0, 1.0, 1.0, 30, 26, 552, 740)
+
+    # Header banner
+    _fill(p1, 0.07, 0.10, 0.20, 30, 678, 552, 3)
+    _fill(p1, 0.97, 0.98, 1.0, 40, 696, 128, 56)
+    logo_cmd_idx = len(p1); p1.append("")          # logo placeholder
+
+    _text(p1, L["brand"],  182, 740, 9, (0.38, 0.44, 0.56))
+    _text(p1, "AG-metrics  |  Reporte AVC / SP", 182, 718, 17, (0.06, 0.08, 0.16))
+    _text(p1, f"{report.get('date_from')} {L['connector']} {report.get('date_to')}", 182, 700, 9, (0.38, 0.44, 0.56))
+    _text(p1, f"{L['generated']}: {now_str}", 182, 688, 8, (0.50, 0.55, 0.65))
+
+    # 4 KPI cards
+    kpis = [
+        (L["total"],   n(totals["total"]),       (0.18, 0.37, 0.72)),
+        (L["matched"], n(totals["matched"]),      (0.08, 0.59, 0.35)),
+        (L["disc"],    n(totals["discrepancy"]),  (0.85, 0.18, 0.33)),
+        (L["det"],     f"{totals['matchRate']}%", rate_col(totals["matchRate"])),
+    ]
+    for ki, (lbl, val, col) in enumerate(kpis):
+        kx = 46 + ki * 133
+        _fill(p1, 1, 1, 1, kx, 618, 124, 44)
+        _fill(p1, *col, kx, 618, 3, 44)             # color left accent
+        _text(p1, lbl.upper(), kx + 10, 647, 6, (0.39, 0.45, 0.55))
+        _text(p1, val, kx + 10, 626, 17, col)
+
+    # Scope strip
+    _fill(p1, 0.96, 0.97, 1.0, 46, 596, 502, 16)
+    lane_str = ", ".join(lanes) if lanes else L["all_lanes"]
+    _text(p1, f"{L['scope']}: {lane_str}  |  {report.get('date_from')} — {report.get('date_to')}", 52, 602, 8, (0.29, 0.33, 0.42))
+
+    # Bar chart
+    _sec(p1, L["results"], 572)
+    legend_items = [(L["match"], (0.13, 0.79, 0.48)), (L["avc_only"], (1.0, 0.49, 0.25)), (L["sat_only"], (0.36, 0.61, 0.96))]
+    lx = 46
+    for lbl, col in legend_items:
+        _fill(p1, *col, lx, 551, 9, 9)
+        _text(p1, lbl, lx + 13, 552, 7, (0.29, 0.33, 0.42))
+        lx += 128
+
+    bar_y = 536
+    for r in rows_sorted[:22]:
+        if bar_y < 50:
+            break
+        t = max(int(r.get("total") or 0), 1)
+        bw = max(10, int(r.get("total") or 0) / max(max_total, 1) * 306)
+        label = f"{r.get('lane', '')}  {r.get('date', '')}"
+        _text(p1, label[:28], 46, bar_y + 3, 7, (0.29, 0.33, 0.42))
+        bx = 194
+        for key, col in [("matched", (0.13, 0.79, 0.48)), ("avcOnly", (1.0, 0.49, 0.25)), ("satOnly", (0.36, 0.61, 0.96))]:
+            v = int(r.get(key) or 0)
+            sw = max(2 if v else 0, v / t * bw)
+            if sw:
+                _fill(p1, *col, bx, bar_y, sw, 11)
+                bx += sw
+        _text(p1, n(r.get("total")), 510, bar_y + 3, 7, (0.39, 0.45, 0.55))
+        bar_y -= 15
+
+    _text(p1, L["footer"], 46, 36, 7, (0.39, 0.45, 0.55))
+    _text(p1, "1 / 2", 556, 36, 7, (0.39, 0.45, 0.55))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PAGE 2 — Evolution · Class comparison · Detail table
+    # ═══════════════════════════════════════════════════════════════════════
+    _fill(p2, 0.95, 0.97, 1.0, 0, 0, 612, 792)
+    _fill(p2, 1.0, 1.0, 1.0, 30, 26, 552, 748)
+    _fill(p2, 0.07, 0.10, 0.20, 30, 762, 552, 4)
+    _text(p2, f"AG-metrics  AVC/SP  |  {report.get('date_from')} {L['connector']} {report.get('date_to')}  |  {now_str}", 46, 769, 8, (0.50, 0.55, 0.65))
+
+    # ── A: Evolución diaria (9 cols) ────────────────────────────────────────
+    # Columns: Date(46) Total(112) Match(158) AVC(202) SP(244) DAVC(286) DSP(328) %Det(370) D%(422)
+    _A_COLS = [
+        (L["date"],  46), ("Total", 112), (L["match"], 158), ("AVC", 202), ("SP", 244),
+        ("D. AVC",  286), ("D. SP", 328), ("% Det.",   370), ("D. %Det.", 422),
+    ]
+    _sec(p2, L["evolution"], 744)
+    _tbl_hdr(p2, 724, _A_COLS)
+
+    evo_y = 724 - RH
+    for i, day in enumerate(daily[:14]):
+        if evo_y < 548:
+            break
+        _row(p2, i, evo_y)
+        rc = rate_col(day["matchRate"])
+        row_vals = [
+            (day["date"],            46), (n(day["total"]),    112),
+            (n(day["matched"]),     158), (n(day["avcOnly"]),  202),
+            (n(day["satOnly"]),     244), (ds(day["dAvc"]),    286),
+            (ds(day["dSat"]),       328), (f"{day['matchRate']}%", 370),
+            (dsr(day["dRate"]),     422),
+        ]
+        for j, (val, vx) in enumerate(row_vals):
+            col = rc if j == 7 else (0.11, 0.15, 0.22)
+            _text(p2, str(val)[:14], vx + 3, evo_y + 4, 7, col)
+        evo_y -= RH
+
+    # ── B: Comparativa por clase (7 cols) ───────────────────────────────────
+    # Columns: Clase(46) AVC(108) SP(156) D.AVC-SP(202) $AVC(262) $SP(342) D.$(422)
+    _B_COLS = [
+        ("Clase", 46), ("AVC", 108), ("SP", 156), ("D. AVC-SP", 202),
+        ("$ AVC", 262), ("$ SP", 342), ("D. $", 422),
+    ]
+    cls_top = max(evo_y - 20, 516)
+    _sec(p2, L["cls_comp"], cls_top)
+    _tbl_hdr(p2, cls_top - 20, _B_COLS)
+
+    cls_y = cls_top - 20 - RH
+    for i, cls in enumerate(class_breakdown[:12]):
+        if cls_y < 290:
+            break
+        _row(p2, i, cls_y)
+        cid = cls.get("class_id") or 0
+        try:
+            cname = CLASS_NAMES_PDF.get(int(float(cid))) or f"C{cid}"
+        except Exception:
+            cname = f"C{cid}"
+        delta_m = float(cls.get("money_delta") or 0)
+        dm_col = (0.85, 0.18, 0.33) if delta_m < 0 else (0.08, 0.59, 0.35)
+        cls_vals = [
+            (cname,                          46), (n(cls.get("avc")),          108),
+            (n(cls.get("sat")),             156), (ds(int(cls.get("delta") or 0)), 202),
+            (money_s(cls.get("avc_money")), 262), (money_s(cls.get("sat_money")), 342),
+            (money_s(delta_m),              422),
+        ]
+        for j, (val, vx) in enumerate(cls_vals):
+            col = dm_col if j == 6 else (0.11, 0.15, 0.22)
+            _text(p2, str(val)[:14], vx + 3, cls_y + 4, 7, col)
+        cls_y -= RH
+
+    # ── C: Detalle por fecha y carril (8 cols) ───────────────────────────────
+    # Columns: Date(46) Lane(112) Total(202) Match(246) AVC(290) SP(330) %Det(370) %Disc(420)
+    _C_COLS = [
+        (L["date"], 46), (L["lane"], 112), ("Total", 202), (L["match"], 246),
+        ("AVC", 290), ("SP", 330), ("% Det.", 370), ("% Disc.", 420),
+    ]
+    det_top = max(cls_y - 20, 262)
+    _sec(p2, L["detail"], det_top)
+    _tbl_hdr(p2, det_top - 20, _C_COLS)
+
+    det_y = det_top - 20 - RH
+    for i, r in enumerate(rows_sorted):
+        if det_y < 46:
+            break
+        _row(p2, i, det_y)
+        mr = float(r.get("matchRate") or 0)
+        rc = rate_col(mr)
+        det_vals = [
+            (r.get("date") or "",                       46),
+            (r.get("lane") or "",                      112),
+            (n(r.get("total")),                        202),
+            (n(r.get("matched")),                      246),
+            (n(r.get("avcOnly")),                      290),
+            (n(r.get("satOnly")),                      330),
+            (f"{mr:.1f}%",                             370),
+            (f"{r.get('discrepancyRate') or 0}%",      420),
+        ]
+        for j, (val, vx) in enumerate(det_vals):
+            col = rc if j == 6 else (0.11, 0.15, 0.22)
+            _text(p2, str(val)[:16], vx + 3, det_y + 4, 7, col)
+        det_y -= RH
+
+    _text(p2, L["footer"], 46, 36, 7, (0.39, 0.45, 0.55))
+    _text(p2, "2 / 2", 556, 36, 7, (0.39, 0.45, 0.55))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Logo load + inject into page 1
+    # ═══════════════════════════════════════════════════════════════════════
     image_bytes = b""
     image_dims = None
     logo_path = os.path.join(BASE_DIR, "frontend", "logo.jpeg")
@@ -1225,106 +1470,53 @@ def _designed_report_pdf_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> 
     except Exception:
         image_bytes = b""
 
-    fill(0.96, 0.98, 1.0, 0, 0, 612, 792)
-    fill(1, 1, 1, 32, 28, 548, 736)
-    fill(0.07, 0.09, 0.14, 32, 675, 548, 3)
-    fill(1, 1, 1, 42, 692, 120, 54)
     if image_bytes and image_dims:
         iw, ih = image_dims
-        ratio = min(108 / iw, 42 / ih)
-        w, h = iw * ratio, ih * ratio
-        cmds.append(f"q {w:.2f} 0 0 {h:.2f} {48 + (108 - w) / 2:.2f} {698 + (42 - h) / 2:.2f} cm /Im1 Do Q")
+        ratio = min(110 / iw, 44 / ih)
+        lw, lh = iw * ratio, ih * ratio
+        p1[logo_cmd_idx] = (
+            f"q {lw:.2f} 0 0 {lh:.2f} {48 + (110 - lw) / 2:.2f} "
+            f"{698 + (44 - lh) / 2:.2f} cm /Im1 Do Q"
+        )
     else:
-        text("AG-metrics", 58, 715, 16, (0.18, 0.37, 0.72))
-    text(labels["brand"], 178, 735, 9, (0.39, 0.45, 0.55))
-    text(form.get("name") or form.get("type") or "AG-metrics Report", 178, 712, 19)
-    text(f"{form.get('plaza') or ''}  |  {form.get('type') or ''}", 178, 694, 10, (0.39, 0.45, 0.55))
-    connector = "a" if spanish else "to"
-    text(f"{report.get('date_from')} {connector} {report.get('date_to')}  |  {labels['generated']} {_now()}", 178, 680, 9, (0.39, 0.45, 0.55))
-    fill(0.92, 0.95, 1.0, 465, 715, 82, 18)
-    text(form.get("template") or "Standard PDF", 472, 721, 8, (0.18, 0.37, 0.72))
+        p1[logo_cmd_idx] = "0.18 0.37 0.72 rg BT /F1 15 Tf 56 712 Td (AG-metrics) Tj ET"
 
-    kpis = [
-        (labels["total"], n(totals["total"]), (0.18, 0.37, 0.72)),
-        (labels["matched"], n(totals["matched"]), (0.08, 0.59, 0.35)),
-        (labels["discrepancies"], n(totals["discrepancy"]), (0.85, 0.18, 0.33)),
-        (labels["detection"], f"{totals['matchRate']}%", (0.18, 0.37, 0.72)),
-        (labels["axle"], n(totals["axleErr"]), (0.72, 0.54, 0.0)),
-        (labels["class"], n(totals["classMismatch"]), (0.85, 0.18, 0.33)),
-    ]
-    for idx, (label, value, color) in enumerate(kpis):
-        col, row = idx % 3, idx // 3
-        x, y = 46 + col * 174, 616 - row * 56
-        fill(1, 1, 1, x, y, 158, 42)
-        fill(0.86, 0.89, 0.94, x, y, 158, 0.8)
-        text(label.upper(), x + 10, y + 27, 7, (0.39, 0.45, 0.55))
-        text(value, x + 10, y + 9, 16, color)
+    # ═══════════════════════════════════════════════════════════════════════
+    # Assemble multi-page PDF
+    # ═══════════════════════════════════════════════════════════════════════
+    s1 = "\n".join(p1).encode("latin-1", errors="replace")
+    s2 = "\n".join(p2).encode("latin-1", errors="replace")
+    font_obj = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
 
-    fill(0.98, 0.99, 1.0, 46, 490, 502, 46)
-    text(labels["scope"], 58, 518, 10)
-    text(f"{labels['lanes']}: {', '.join(lanes) if lanes else labels['all_lanes']}", 58, 503, 8, (0.29, 0.33, 0.41))
-    text(f"{labels['frequency']}: {form.get('frequency') or labels['manual']}", 320, 503, 8, (0.29, 0.33, 0.41))
-
-    text(labels["results"], 46, 465, 12)
-    legend = [(labels["matched"], (0.13, 0.79, 0.48)), (labels["avc_only"], (1.0, 0.49, 0.25)), (labels["sat_only"], (0.36, 0.61, 0.96)), (labels["axle"], (0.96, 0.83, 0.20))]
-    lx = 46
-    for label, color in legend:
-        fill(*color, lx, 445, 8, 8)
-        text(label, lx + 12, 446, 7, (0.29, 0.33, 0.41))
-        lx += 82
-
-    y = 420
-    for r in rows[:10]:
-        total = max(int(r.get("total") or 0), 1)
-        bar_w = max(12, int(r.get("total") or 0) / max(max_total, 1) * 320)
-        text(f"{r.get('lane')} {r.get('date')}", 46, y + 4, 7, (0.29, 0.33, 0.41))
-        x = 190
-        for key, color in [("matched", (0.13, 0.79, 0.48)), ("avcOnly", (1.0, 0.49, 0.25)), ("satOnly", (0.36, 0.61, 0.96)), ("axleErr", (0.96, 0.83, 0.20))]:
-            value = int(r.get(key) or 0)
-            seg_w = max(2 if value else 0, value / total * bar_w)
-            if seg_w:
-                fill(*color, x, y, seg_w, 10)
-                x += seg_w
-        text(n(r.get("total")), 525, y + 2, 7)
-        y -= 18
-
-    text(labels["detail"], 46, 230, 12)
-    headers = [labels["date"], labels["lane"], "Total", labels["match"], "AVC", "SP", "Ejes", "% Disc."]
-    widths = [60, 118, 45, 45, 45, 45, 45, 55]
-    x = 46
-    fill(0.95, 0.96, 0.98, 46, 210, 468, 16)
-    for h, w in zip(headers, widths):
-        text(h, x + 3, 216, 7, (0.29, 0.33, 0.41))
-        x += w
-    y = 195
-    for r in rows[:11]:
-        x = 46
-        vals = [r.get("date"), r.get("lane"), n(r.get("total")), n(r.get("matched")), n(r.get("avcOnly")), n(r.get("satOnly")), n(r.get("axleErr")), f"{r.get('discrepancyRate') or 0}%"]
-        for val, w in zip(vals, widths):
-            text(str(val)[:22], x + 3, y, 7, (0.11, 0.15, 0.22))
-            x += w
-        y -= 14
-    text(labels["footer"], 46, 46, 8, (0.39, 0.45, 0.55))
-
-    stream = "\n".join(cmds).encode("latin-1", errors="replace")
-    resources = "/Font << /F1 4 0 R >>"
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        None,
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
-    ]
     if image_bytes and image_dims:
         iw, ih = image_dims
-        resources = "/Font << /F1 4 0 R >> /XObject << /Im1 6 0 R >>"
-        objects.append(
+        r1 = "/Font << /F1 4 0 R >> /XObject << /Im1 6 0 R >>"
+        r2 = "/Font << /F1 4 0 R >>"
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",                              # 1
+            b"<< /Type /Pages /Kids [3 0 R 7 0 R] /Count 2 >>",               # 2
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {r1} >> /Contents 5 0 R >>".encode(),  # 3
+            font_obj,                                                            # 4
+            b"<< /Length " + str(len(s1)).encode() + b" >>\nstream\n" + s1 + b"\nendstream",  # 5
             b"<< /Type /XObject /Subtype /Image /Width " + str(iw).encode() +
             b" /Height " + str(ih).encode() +
-            b" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + str(len(image_bytes)).encode() +
-            b" >>\nstream\n" + image_bytes + b"\nendstream"
-        )
-    objects[2] = f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {resources} >> /Contents 5 0 R >>".encode()
+            b" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " +
+            str(len(image_bytes)).encode() + b" >>\nstream\n" + image_bytes + b"\nendstream",  # 6
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {r2} >> /Contents 8 0 R >>".encode(),  # 7
+            b"<< /Length " + str(len(s2)).encode() + b" >>\nstream\n" + s2 + b"\nendstream",  # 8
+        ]
+    else:
+        res = "/Font << /F1 4 0 R >>"
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",                              # 1
+            b"<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>",               # 2
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {res} >> /Contents 5 0 R >>".encode(),  # 3
+            font_obj,                                                            # 4
+            b"<< /Length " + str(len(s1)).encode() + b" >>\nstream\n" + s1 + b"\nendstream",  # 5
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {res} >> /Contents 7 0 R >>".encode(),  # 6
+            b"<< /Length " + str(len(s2)).encode() + b" >>\nstream\n" + s2 + b"\nendstream",  # 7
+        ]
+
     pdf = bytearray(b"%PDF-1.4\n")
     offsets = [0]
     for idx, obj in enumerate(objects, 1):
@@ -1333,10 +1525,10 @@ def _designed_report_pdf_bytes(form: Dict[str, Any], report: Dict[str, Any]) -> 
         pdf.extend(obj)
         pdf.extend(b"\nendobj\n")
     xref = len(pdf)
-    pdf.extend(f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode())
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
     for off in offsets[1:]:
         pdf.extend(f"{off:010d} 00000 n \n".encode())
-    pdf.extend(f"trailer << /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    pdf.extend(f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
     return bytes(pdf)
 
 
@@ -1563,16 +1755,20 @@ def _lane_device_id(source_id: int, lane_name: str) -> str:
     raise HTTPException(404, f"No hay device_id sincronizado para el carril AVC '{lane_name}'")
 
 
-def _snapshot_unix_value(value: str, timezone_name: str) -> str:
+def _snapshot_unix_value(value: str, timezone_name: str, offset_seconds: int = 0) -> str:
     raw = str(value or "").strip()
     if re.fullmatch(r"\d{10,13}", raw):
-        return raw
+        # Epoch numérico: 10 dígitos = segundos, 13 = milisegundos
+        if len(raw) <= 10:
+            return str(int(raw) + offset_seconds)
+        return str(int(raw) + offset_seconds * 1000)
     parsed = parse_date(raw)
     if pd.isna(parsed):
         raise HTTPException(400, "Timestamp SP inválido")
     dt = parsed.to_pydatetime() if isinstance(parsed, pd.Timestamp) else parsed
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=get_event_tz(timezone_name))
+    dt = dt + timedelta(seconds=offset_seconds)
     return str(int(dt.timestamp() * 1000))
 
 
@@ -1716,9 +1912,13 @@ def get_sat_evidence_photo(source_id: int, avc_lane: str, sat_timestamp: str,
                            user=Depends(_get_user)):
     config = _source_evidence_config(source_id)
     device_id = _lane_device_id(source_id, avc_lane)
+    # La foto física del vehículo ocurre ~60 s después del registro SP (el vehículo
+    # paga en caseta y luego cruza el detector). Se suma 60 s al timestamp SP para
+    # alinear la solicitud de snapshot con el momento del cruce.
     timestamp = _snapshot_unix_value(
         sat_timestamp,
         str(config.get("timezone") or load_saved_settings().get("timezone") or "America/Mexico_City"),
+        offset_seconds=60,
     )
     snapshot = _request_alice_snapshot(config, device_id, timestamp)
     evidence = snapshot["evidence"]
@@ -2015,21 +2215,17 @@ def get_status(query_date: str = "", user=Depends(_get_user)):
     day_str  = d.strftime("%Y%m%d")
     date_str = d.isoformat()
 
-    # Archivos SAT pendientes de merge
-    pending_files = [
-        f for f in glob.glob(os.path.join(WATCH_DIR, f"SAT-TEXCOCO-{day_str}*.json"))
-        if not os.path.basename(f).endswith("-MERGED.json")
-    ]
-
     # SAT merged: transacciones y carriles
     mp = os.path.join(MERGED_DIR, f"SAT-TEXCOCO-{day_str}-MERGED.json")
     sat_merged, sat_lanes = 0, []
     sat_updated_at = ""
+    _processed_batches = set()
     if os.path.exists(mp):
         try:
             sat_updated_at = datetime.fromtimestamp(os.path.getmtime(mp)).isoformat()
             with open(mp, "r", encoding="utf-8") as fh:
                 mdata = json.load(fh)
+            _processed_batches = set(mdata.get("processed_batches", []))
             sat_merged = len(mdata.get("transactions", []))
             sat_df_tmp = pd.DataFrame(mdata.get("transactions", []))
             if not sat_df_tmp.empty:
@@ -2038,6 +2234,16 @@ def get_status(query_date: str = "", user=Depends(_get_user)):
                     sat_lanes = sorted(sat_df_tmp[sc["voie"]].dropna().astype(str).unique().tolist())
         except Exception:
             pass
+
+    # Pendiente = batches crudos cuyo batchuid NO está en processed_batches del merged.
+    # El merge no puede borrar los crudos (son de otro usuario), por eso no basta con
+    # contar archivos ni con ver si el merged existe: hay que comparar contra los
+    # batches ya procesados. El nombre del archivo (sin .json) es el batchuid.
+    pending_files = [
+        f for f in glob.glob(os.path.join(WATCH_DIR, f"SAT-TEXCOCO-{day_str}*.json"))
+        if not os.path.basename(f).endswith("-MERGED.json")
+        and os.path.basename(f)[:-5] not in _processed_batches
+    ]
 
     # AVC local: eventos y carriles
     with _db() as c:
@@ -2469,7 +2675,36 @@ def get_reports_summary(date_from: str = "", date_to: str = "", user=Depends(_ge
     class_totals: Dict[str, Dict] = {}
     worst_rows: List[Dict[str, Any]] = []
 
+    # Pre-scan: per (lane, date) keep only the cache entry with the highest source_id.
+    # The system writes every reconciliation result twice — once under the real source_id
+    # and once under source_id=0 as a compatibility fallback (_save_cache line 524).
+    # Without deduplication, every lane appears twice in the report.
+    _best_sid: Dict[tuple, int] = {}
+    _best_cache_key: Dict[tuple, str] = {}
+    for _r in rows:
+        _parts = _r["cache_key"].split("::", 2)
+        if len(_parts) == 3:
+            _sid_str, _rlane, _rfecha = _parts
+        else:
+            _sid_str = str(_r["source_id"] or 0)
+            _rlane = _parts[0] if _parts else ""
+            _rfecha = _parts[-1] if _parts else ""
+        try:
+            _rd = datetime.strptime(_rfecha, "%Y-%m-%d").date()
+            if _rd < d_from or _rd > d_to:
+                continue
+        except Exception:
+            continue
+        _sid_int = int(_sid_str or 0)
+        _dk = (_rlane, _rfecha)
+        if _dk not in _best_sid or _sid_int > _best_sid[_dk]:
+            _best_sid[_dk] = _sid_int
+            _best_cache_key[_dk] = _r["cache_key"]
+    _winning_keys: set = set(_best_cache_key.values())
+
     for r in rows:
+        if r["cache_key"] not in _winning_keys:
+            continue
         parts = r["cache_key"].split("::", 2)
         if len(parts) == 3:
             source_id, lane, fecha = parts
@@ -2639,7 +2874,31 @@ def get_reports_hourly(date_from: str = "", date_to: str = "", lanes: str = "", 
     with _db() as c:
         db_rows = c.execute("SELECT cache_key, result_json FROM recon_cache ORDER BY cache_key").fetchall()
 
+    # Deduplicate: keep only the highest source_id entry per (lane, date) — same logic as /api/reports/summary
+    _best_sid_h: Dict[tuple, int] = {}
+    _best_key_h: Dict[tuple, str] = {}
+    for _r in db_rows:
+        _parts = _r["cache_key"].split("::", 2)
+        _lane = _parts[1] if len(_parts) == 3 else (_parts[0] if _parts else "")
+        _fecha = _parts[2] if len(_parts) == 3 else (_parts[-1] if _parts else "")
+        try:
+            _rd = datetime.strptime(_fecha, "%Y-%m-%d").date()
+            if _rd < d_from or _rd > d_to:
+                continue
+        except Exception:
+            continue
+        if lane_filter and _lane not in lane_filter:
+            continue
+        _sid_int = int(_parts[0] if len(_parts) == 3 and _parts[0].isdigit() else 0)
+        _dk = (_lane, _fecha)
+        if _dk not in _best_sid_h or _sid_int > _best_sid_h[_dk]:
+            _best_sid_h[_dk] = _sid_int
+            _best_key_h[_dk] = _r["cache_key"]
+    _winning_keys_h: set = set(_best_key_h.values())
+
     for r in db_rows:
+        if r["cache_key"] not in _winning_keys_h:
+            continue
         parts = r["cache_key"].split("::", 2)
         lane = parts[1] if len(parts) == 3 else (parts[0] if parts else "")
         fecha = parts[2] if len(parts) == 3 else (parts[-1] if parts else "")
@@ -2706,8 +2965,32 @@ def get_reports_events(date_from: str = "", date_to: str = "", lanes: str = "", 
     with _db() as c:
         db_rows = c.execute("SELECT cache_key, result_json FROM recon_cache ORDER BY cache_key").fetchall()
 
+    # Deduplicate: keep only the highest source_id entry per (lane, date) to avoid doubling events
+    _best_sid_e: Dict[tuple, int] = {}
+    _best_key_e: Dict[tuple, str] = {}
+    for _r in db_rows:
+        _parts = _r["cache_key"].split("::", 2)
+        _lane = _parts[1] if len(_parts) == 3 else (_parts[0] if _parts else "")
+        _fecha = _parts[2] if len(_parts) == 3 else (_parts[-1] if _parts else "")
+        try:
+            _rd = datetime.strptime(_fecha, "%Y-%m-%d").date()
+            if _rd < d_from or _rd > d_to:
+                continue
+        except Exception:
+            continue
+        if lane_filter and _lane not in lane_filter:
+            continue
+        _sid_int = int(_parts[0] if len(_parts) == 3 and _parts[0].isdigit() else 0)
+        _dk = (_lane, _fecha)
+        if _dk not in _best_sid_e or _sid_int > _best_sid_e[_dk]:
+            _best_sid_e[_dk] = _sid_int
+            _best_key_e[_dk] = _r["cache_key"]
+    _winning_keys_e: set = set(_best_key_e.values())
+
     result_events: List[Dict[str, Any]] = []
     for r in db_rows:
+        if r["cache_key"] not in _winning_keys_e:
+            continue
         if len(result_events) >= limit:
             break
         parts = r["cache_key"].split("::", 2)
@@ -2733,20 +3016,42 @@ def get_reports_events(date_from: str = "", date_to: str = "", lanes: str = "", 
                 "carril": lane,
                 "tipo": ev.get("tipo", ""),
                 "match_valido": ev.get("match_valido", ""),
+                # AVC fields
                 "avc_id": ev.get("avc_id") or ev.get("id") or "",
+                "avc_device": ev.get("avc_device") or "",
                 "avc_hora": ev.get("event_mexico") or ev.get("avc_date") or "",
                 "avc_vehiculo": ev.get("vehicle_type") or ev.get("Vehicle_type") or "",
                 "avc_ejes": ev.get("axle_count") or ev.get("axles_avc") or "",
                 "avc_clase": ev.get("clase_avc_mapeada") or "",
+                # SP core fields
                 "sat_voie": ev.get("sat_voie") or "",
                 "sat_hora": ev.get("sat_date") or "",
                 "sat_numero": ev.get("sat_numero") or "",
                 "sat_id_classe": ev.get("id_classe") or "",
                 "sat_tab_id_classe": ev.get("tab_id_classe") or "",
                 "sat_precio": ev.get("sat_prix") or "",
+                # SP extended fields
+                "sat_day_id": ev.get("sat_day_id") or "",
+                "sat_id_gare": ev.get("sat_id_gare") or "",
+                "sat_id_voie_num": ev.get("sat_id_voie") or "",
+                "sat_id_mode_voie": ev.get("sat_id_mode_voie") or "",
+                "sat_numero_poste": ev.get("sat_numero_poste") or "",
+                "sat_matricule": ev.get("sat_matricule") or "",
+                "sat_id_obs_mp": ev.get("sat_id_obs_mp") or "",
+                "sat_id_obs_sequence": ev.get("sat_id_obs_sequence") or "",
+                "sat_id_obs_passage": ev.get("sat_id_obs_passage") or "",
+                "sat_id_paiement": ev.get("sat_id_paiement") or "",
+                "sat_mode_reglement": ev.get("sat_mode_reglement") or "",
+                "sat_fh_carga": ev.get("sat_fh_carga") or "",
+                "sat_id_classe_desc": ev.get("sat_id_classe_desc") or "",
+                "sat_tab_id_classe_desc": ev.get("sat_tab_id_classe_desc") or "",
+                "sat_id_classe_ejes": ev.get("sat_id_clase_ejes") or ev.get("sat_id_classe_ejes") or "",
+                "sat_tab_id_classe_ejes": ev.get("sat_tab_id_clase_ejes") or ev.get("sat_tab_id_classe_ejes") or "",
+                # Match quality
                 "delta_segundos": ev.get("delta_segundos") or "",
                 "nota_ejes": ev.get("nota_ejes") or "",
                 "motivo_no_match": ev.get("motivo_no_match") or "",
+                "observacion": ev.get("observacion_auditoria") or "",
             })
 
     return {
@@ -2759,21 +3064,28 @@ def get_reports_events(date_from: str = "", date_to: str = "", lanes: str = "", 
 
 def _send_configured_report(report_type: str, date_from: str, date_to: str) -> Dict[str, Any]:
     settings = _report_email_settings()
-    recipients = [
-        r.get("email") for r in settings.get("recipients", [])
-        if r.get("enabled", True) and report_type in (r.get("report_types") or [])
-    ]
-    recipients = [r for r in recipients if r]
+    # Support recipients as plain strings or legacy objects {email, name, report_types, enabled}
+    recipients: List[str] = []
+    for r in settings.get("recipients", []):
+        if isinstance(r, str):
+            if r.strip():
+                recipients.append(r.strip())
+        elif isinstance(r, dict):
+            email = (r.get("email") or "").strip()
+            if email and r.get("enabled", True):
+                recipients.append(email)
     if not recipients:
-        raise ValueError(f"Sin destinatarios activos para reporte {report_type}")
+        raise ValueError(f"Sin destinatarios configurados — agrega al menos uno en Reportes → Configuración")
     report = get_reports_summary(date_from, date_to, user={"id": 0})
+    lang = settings.get("language") or "Spanish"
+    form = {"lanes": report.get("lanes", []), "type": "", "language": lang}
+    pdf = _designed_report_pdf_bytes(form, report)
     title = f"Reporte AG-metrics {report_type.upper()}"
-    pdf = _report_pdf_bytes(title, report)
     _send_report_email(
         settings,
         recipients,
         f"{title} | {date_from} a {date_to}",
-        "Adjunto encontrarás el reporte PDF generado automáticamente por AG-metrics.",
+        f"Adjunto encontrarás el reporte {report_type} ({date_from} – {date_to}) generado automáticamente por AG-metrics.",
         f"ag-metrics-{report_type}-{date_from}-{date_to}.pdf",
         pdf,
     )
@@ -3185,9 +3497,30 @@ async def merge_sat(request: Request, user=Depends(_get_user)):
 # Imagen — proxy SSH
 # ─────────────────────────────────────────────────────────
 
+def _try_evidence_http(cfg: dict, path: str):
+    """Intenta descargar una imagen via HTTP desde evidence_base_url. Devuelve (bytes, mime) o (None, None)."""
+    base = str(cfg.get("evidence_base_url") or "").strip().rstrip("/")
+    key  = str(cfg.get("evidence_api_key") or "")
+    verify = bool(cfg.get("evidence_verify_ssl", True))
+    if not base or not path.startswith("/"):
+        return None, None
+    try:
+        resp = _requests.get(
+            f"{base}{path}",
+            headers={"Authorization": f"Bearer {key}"} if key else {},
+            timeout=10,
+            verify=verify,
+        )
+        if resp.status_code == 200 and resp.content:
+            mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
+            return resp.content, mime
+    except Exception:
+        pass
+    return None, None
+
+
 @app.get("/api/image")
 def get_image(ref: str, source_id: Optional[int] = None, user=Depends(_get_user)):
-    # Resolver config SSH de la fuente indicada (o la primera disponible)
     settings = {}
     if source_id:
         with _db() as c:
@@ -3201,6 +3534,26 @@ def get_image(ref: str, source_id: Optional[int] = None, user=Depends(_get_user)
         if ref.lower().startswith(prefix):
             ref = urlparse(ref).path
             break
+
+    # Intentar HTTP desde evidence_base_url (evita depender de SSH para sources sin acceso SFTP)
+    img_bytes, mime = _try_evidence_http(settings, ref)
+    if img_bytes:
+        return Response(content=img_bytes, media_type=mime)
+
+    # Si no vino source_id, probar todas las fuentes habilitadas (source puede ser distinto al default)
+    if not source_id:
+        with _db() as c:
+            all_sources = c.execute("SELECT config FROM avc_sources WHERE enabled=1").fetchall()
+        for src_row in all_sources:
+            try:
+                cfg = json.loads(src_row["config"] or "{}")
+                img_bytes, mime = _try_evidence_http(cfg, ref)
+                if img_bytes:
+                    return Response(content=img_bytes, media_type=mime)
+            except Exception:
+                continue
+
+    # Fallback: SSH/SFTP (funciona para sources con acceso SSH al media_root)
     try:
         img_bytes, mime, _ = fetch_remote_image_bytes(settings, ref)
         return Response(content=img_bytes, media_type=mime)
@@ -3270,6 +3623,7 @@ async def update_user(uid: int, request: Request, user=Depends(_require_admin)):
 
 _REPORT_SCHED_LOCK_FH = None
 _AVC_SYNC_LOCK_FH = None
+_RECONCILE_AUTO_LOCK_FH = None
 
 def _weekday_key(dt: datetime) -> str:
     return ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"][dt.weekday()]
@@ -3305,6 +3659,20 @@ def _report_scheduler_loop() -> None:
                     end_day = now.date() - timedelta(days=1)
                     start_day = end_day - timedelta(days=6)
                     _send_configured_report("weekly", start_day.isoformat(), end_day.isoformat())
+                    mark_sent(key)
+
+            if (
+                schedule.get("monthly_enabled")
+                and now.day == 1
+                and now.strftime("%H:%M") == (schedule.get("monthly_time") or "07:00")
+            ):
+                key = "monthly"
+                if last_sent.get(key) != now.strftime("%Y-%m-%d"):
+                    # Previous month: from day 1 to last day
+                    first_of_this_month = now.date().replace(day=1)
+                    last_day_prev = first_of_this_month - timedelta(days=1)
+                    first_day_prev = last_day_prev.replace(day=1)
+                    _send_configured_report("monthly", first_day_prev.isoformat(), last_day_prev.isoformat())
                     mark_sent(key)
         except Exception:
             pass
@@ -3364,6 +3732,66 @@ def _start_avc_sync_scheduler_once() -> None:
     t.start()
 
 
+def _auto_reconcile_scheduler_loop() -> None:
+    """
+    Cada RECONCILE_AUTO_INTERVAL_SECONDS revisa los últimos RECONCILE_AUTO_DAYS_BACK días.
+    Por cada día que tenga un merged SAT pero sin cache (o el SAT es más reciente que el cache),
+    lanza _start_reconcile_date_cache en hilo de fondo.
+    """
+    time.sleep(30)  # esperar a que el servidor termine de iniciar
+    while True:
+        try:
+            cfg = load_saved_settings()
+            tz = get_event_tz(cfg)
+            today = datetime.now(tz).date()
+
+            # Obtener todos los cache_key con source_id=0 y su created_at
+            with _db() as c:
+                cache_rows = c.execute(
+                    "SELECT cache_key, created_at FROM recon_cache WHERE cache_key LIKE '0::%'"
+                ).fetchall()
+
+            # Agrupar por fecha: fecha -> max(created_at) del cache
+            cache_by_date: Dict[str, str] = {}
+            for row in cache_rows:
+                parts = row["cache_key"].split("::", 2)
+                if len(parts) == 3:
+                    fecha_key = parts[2]
+                    if fecha_key not in cache_by_date or row["created_at"] > cache_by_date[fecha_key]:
+                        cache_by_date[fecha_key] = row["created_at"]
+
+            for days_ago in range(RECONCILE_AUTO_DAYS_BACK, -1, -1):
+                target_date = today - timedelta(days=days_ago)
+                day_str = target_date.strftime("%Y%m%d")
+                fecha = target_date.isoformat()
+
+                mp = os.path.join(MERGED_DIR, f"SAT-TEXCOCO-{day_str}-MERGED.json")
+                if not os.path.exists(mp):
+                    continue
+
+                if fecha in cache_by_date:
+                    # Verificar si el SAT fue actualizado después del último cache
+                    sat_mtime = datetime.fromtimestamp(os.path.getmtime(mp)).isoformat()
+                    if sat_mtime <= cache_by_date[fecha]:
+                        continue  # cache vigente, nada que hacer
+
+                _start_reconcile_date_cache(day_str)
+        except Exception:
+            pass
+        time.sleep(max(60, RECONCILE_AUTO_INTERVAL_SECONDS))
+
+
+def _start_auto_reconcile_scheduler_once() -> None:
+    global _RECONCILE_AUTO_LOCK_FH
+    try:
+        _RECONCILE_AUTO_LOCK_FH = open("/tmp/auditec_auto_reconcile_scheduler.lock", "w")
+        fcntl.flock(_RECONCILE_AUTO_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        return
+    t = threading.Thread(target=_auto_reconcile_scheduler_loop, daemon=True)
+    t.start()
+
+
 # ─────────────────────────────────────────────────────────
 # Startup + static
 # ─────────────────────────────────────────────────────────
@@ -3373,6 +3801,7 @@ def startup():
     _ensure_schema()
     _start_report_scheduler_once()
     _start_avc_sync_scheduler_once()
+    _start_auto_reconcile_scheduler_once()
 
 frontend_dir = os.path.join(BASE_DIR, "frontend")
 

@@ -8,18 +8,15 @@ const NAV_ITEMS = [
       <rect x="10" y="10" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
     </svg>
   )},
-  { id: "reports:list", label: "Reports", icon: (
+  { id: "reports:view", label: "Reports", icon: (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
       <rect x="2" y="2" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.5"/>
       <path d="M5 9h8M5 6h5M5 12h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
     </svg>
   ), children: [
-    { id: "reports:view", label: "Ver Reporte" },
-    { id: "reports:list", label: "Report List" },
-    { id: "reports:create", label: "Create Report" },
-    { id: "reports:settings", label: "Report Settings" },
-    { id: "reports:templates", label: "Report Templates" },
-    { id: "reports:history", label: "Report History" },
+    { id: "reports:view",     label: "Ver Reporte" },
+    { id: "reports:settings", label: "Configuración" },
+    { id: "reports:history",  label: "Historial" },
   ]},
   { id: "alarms:active", label: "Alarms", adminOnly: true, icon: (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">

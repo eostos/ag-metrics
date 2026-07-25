@@ -589,6 +589,76 @@ def detect_col(cols, patterns, exclude=None):
     return None
 
 
+def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
+                  ventana, after_tol):
+    """
+    Alineación de secuencias SP<->AVC por programación dinámica (Needleman-Wunsch).
+
+    Reglas (spec de conciliación):
+      - SP ocurre ANTES que AVC: delta = sat_ts - avc_ts debe estar en
+        [-ventana, +after_tol].
+      - Compatibilidad de clase OBLIGATORIA (is_class_compatible). Moto solo
+        empareja con moto.
+      - Monotonicidad: los matches no se cruzan en el tiempo (ambas listas
+        deben venir ordenadas ascendentemente por hora).
+    Objetivo lexicográfico: (1) maximizar nº de matches válidos, luego
+    (2) minimizar la suma de |delta| (desempate por proximidad). La cardinalidad
+    domina, por eso no hace falta configurar target_delta por carril.
+
+    Devuelve dict {indice_avc: indice_sat} con la asignación óptima.
+    Memoria O(n*m) en un bytearray de retroceso; valores en filas rodantes.
+    """
+    n, m = len(avc_ts), len(sat_ts)
+    if n == 0 or m == 0:
+        return {}
+    BIG = 10 ** 6
+    W = m + 1
+    bt = bytearray((n + 1) * W)   # 0=diag(match) 1=arriba(skip AVC) 2=izq(skip SAT)
+    for j in range(1, W):
+        bt[j] = 2                 # fila 0: solo se saltan SAT
+    prev = [0.0] * W              # dp[0][*] = 0
+    excluded_set = excluded if isinstance(excluded, set) else set(excluded)
+    for i in range(1, n + 1):
+        cur = [0.0] * W
+        rowbase = i * W
+        bt[rowbase] = 1           # columna 0: solo se saltan AVC
+        ai_ts = avc_ts[i - 1]
+        ai_cls = avc_cls[i - 1]
+        loj = bisect_left(sat_ts, ai_ts - ventana)
+        hij = bisect_right(sat_ts, ai_ts + after_tol)
+        for j in range(1, W):
+            up = prev[j]          # saltar AVC i-1
+            left = cur[j - 1]     # saltar SAT j-1
+            if up >= left:
+                best = up; b = 1
+            else:
+                best = left; b = 2
+            jj = j - 1
+            if loj <= jj < hij and jj not in excluded_set and \
+               is_class_compatible(ai_cls, sat_cls[jj], sat_tab[jj]):
+                delta = sat_ts[jj] - ai_ts
+                if -ventana <= delta <= after_tol:
+                    cand = prev[j - 1] + BIG - abs(delta)
+                    if cand > best:
+                        best = cand; b = 0
+            cur[j] = best
+            bt[rowbase + j] = b
+        prev = cur
+    # retroceso
+    i, j = n, m
+    assign = {}
+    while i > 0 or j > 0:
+        b = bt[i * W + j]
+        if b == 0:
+            assign[i - 1] = j - 1
+            i -= 1; j -= 1
+        elif b == 1:
+            i -= 1
+        else:
+            j -= 1
+    return assign
+
+
 def reconcile(
     avc_df: pd.DataFrame,
     sat_df: pd.DataFrame,
@@ -681,6 +751,28 @@ def reconcile(
 
     excluded_sat = {j for j in range(len(sat_f)) if is_sat_excluded(j)}
 
+    _SAT_AFTER_TOLERANCE = 30  # segundos de tolerancia por desfase de relojes
+
+    # Asignación óptima global SP<->AVC mediante alineación de secuencias (DP).
+    # Sustituye la selección greedy: maximiza nº de matches sin cruzar folios,
+    # respetando ventana, clase dura (moto solo con moto) y monotonicidad.
+    def _avc_ax(idx):
+        v = safe(avc_f, col_avc_axles, idx)
+        return int(float(v)) if v != "" else 0
+
+    avc_ts_all = [
+        ts.timestamp() if not pd.isna(ts) else float("inf")
+        for ts in avc_f["_ts"]
+    ]
+    avc_cls_all = [
+        map_avc_class(str(safe(avc_f, col_avc_type, idx) or ""), _avc_ax(idx))
+        for idx in range(n_avc)
+    ]
+    avc_assign = align_avc_sat(
+        avc_ts_all, avc_cls_all, sat_ts_s, sat_cls_pre, sat_tab_pre,
+        excluded_sat, ventana, _SAT_AFTER_TOLERANCE,
+    )
+
     for i in range(n_avc):
         if progress_callback and i % 50 == 0:
             progress_callback(i / n_avc)
@@ -697,8 +789,7 @@ def reconcile(
         avc_id = safe(avc_f, col_avc_id, i)
 
         # SAT ocurre ANTES que AVC: ventana asimétrica
-        # Busca SAT en [avc_ts - ventana, avc_ts + 30s] ordenados de menor a mayor
-        _SAT_AFTER_TOLERANCE = 30  # segundos de tolerancia por desfase de relojes
+        # Candidatos en [avc_ts - ventana, avc_ts + 30s] solo para diagnóstico/motivo
         lo = bisect_left(sat_ts_s,  ts_avc_s - ventana)
         hi = bisect_right(sat_ts_s, ts_avc_s + _SAT_AFTER_TOLERANCE)
 
@@ -718,17 +809,19 @@ def reconcile(
             for c in cands[:8]
         ) or f"sin_candidatos_en_ventana+-{ventana}s"
 
-        chosen = next((c for c in cands if is_class_compatible(avc_cls, c["sc"], c["tc"])), None)
+        # Selección desde la alineación global óptima (no greedy)
+        assigned_j = avc_assign.get(i)
 
-        if chosen:
-            used_sat.add(chosen["j"])
-            j = chosen["j"]
+        if assigned_j is not None:
+            used_sat.add(assigned_j)
+            j = assigned_j
+            delta_sel = sat_ts_s[j] - ts_avc_s  # negativo = SAT antes de AVC (correcto)
             sc_val = safe(sat_f, col_sat_cls, j)
             tc_val = safe(sat_f, col_sat_tab, j)
             sc = int(float(sc_val or 0))
             tc = int(float(tc_val or 0))
             comp_id, comp_tab, nota = compare_ejes(ax, sc, tc)
-            dir_delta = f"SAT_antes_AVC_{abs(round(chosen['delta']))}s" if chosen["delta"] <= 0 else f"SAT_despues_AVC_{round(chosen['delta'])}s_ATIPICO"
+            dir_delta = f"SAT_antes_AVC_{abs(round(delta_sel))}s" if delta_sel <= 0 else f"SAT_despues_AVC_{round(delta_sel)}s_ATIPICO"
             obs = (
                 "Motocicleta conciliada" if nota == "OK_MOTO"
                 else "Match correcto - ejes coinciden" if nota == "OK"
@@ -759,7 +852,7 @@ def reconcile(
                     "comparacion_ejes_id": comp_id,
                     "comparacion_ejes_tab": comp_tab,
                     "nota_ejes": nota,
-                    "delta_segundos": round(chosen["delta"]),
+                    "delta_segundos": round(delta_sel),
                     "direccion_delta": dir_delta,
                     "match_valido": True,
                     "motivo_no_match": "",

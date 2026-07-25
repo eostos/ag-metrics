@@ -76,7 +76,7 @@ const SAT_EXTRA_FIELDS = [
   ["fh_carga", "sat_fh_carga"],
 ];
 
-function VehicleImage({ imageRef, avcId }) {
+function VehicleImage({ imageRef, avcId, sourceId }) {
   const [src, setSrc] = React.useState(null);
   const [err, setErr] = React.useState(false);
 
@@ -86,8 +86,10 @@ function VehicleImage({ imageRef, avcId }) {
     if (imageRef.startsWith("http") && !imageRef.includes("localhost") && !imageRef.includes("127.0.0.1")) {
       setSrc(imageRef); return;
     }
-    // Proxy through backend
-    const url = `/api/image?ref=${encodeURIComponent(imageRef)}`;
+    // Proxy through backend — include source_id so the backend uses the right SSH host
+    const params = new URLSearchParams({ref: imageRef});
+    if (sourceId) params.set("source_id", String(sourceId));
+    const url = `/api/image?${params.toString()}`;
     fetch(url, {headers:{Authorization:`Bearer ${window.API.token()}`}})
       .then(r => { if (r.ok) return r.blob(); throw new Error(); })
       .then(blob => setSrc(URL.createObjectURL(blob)))
@@ -113,7 +115,7 @@ function VehicleImage({ imageRef, avcId }) {
   return <img src={src} alt={`AVC ${avcId}`} style={{width:"100%",borderRadius:8,maxHeight:200,objectFit:"cover",border:"1px solid #2a3045"}}/>;
 }
 
-function EvidencePanel({ event }) {
+function EvidencePanel({ event, sourceId }) {
   if (!event) return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:12,color:"#5b6a8a"}}>
       <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
@@ -139,7 +141,7 @@ function EvidencePanel({ event }) {
       </div>
 
       <div style={{marginBottom:14}}>
-        <VehicleImage imageRef={imageRef} avcId={event.id||event.avc_id||""}/>
+        <VehicleImage imageRef={imageRef} avcId={event.id||event.avc_id||""} sourceId={sourceId}/>
       </div>
 
       <div style={evStyles.section}>
@@ -394,7 +396,7 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
         <div style={mStyles.imageCompare}>
           <div style={mStyles.imagePane}>
             <div style={mStyles.secTitle}>Imagen AVC registrada</div>
-            <VehicleImage imageRef={imageRef} avcId={event.id || event.avc_id || ""} />
+            <VehicleImage imageRef={imageRef} avcId={event.id || event.avc_id || ""} sourceId={sourceId} />
           </div>
           <div style={mStyles.imagePane}>
             <div style={mStyles.secTitle}>Foto requerida desde SP</div>
@@ -710,7 +712,10 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
   }, [date, satLane, satLanesDate, allEvents.length, recoSource, mappingReady]); // eslint-disable-line
 
   const filtered = React.useMemo(() => {
-    let evts = activeTab==="all" ? allEvents : allEvents.filter(e=>(e.tipo||e.status)===activeTab);
+    const isAxleErr = e => e.tipo==="MATCH" && String(e.nota_ejes||"").startsWith("ERROR");
+    let evts = activeTab==="all" ? allEvents
+             : activeTab==="axle_error" ? allEvents.filter(isAxleErr)
+             : allEvents.filter(e=>(e.tipo||e.status)===activeTab);
     if (classFilter) {
       const clsTarget = Number(classFilter.class_id);
       evts = evts.filter(e => {
@@ -754,8 +759,8 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
     {key:"avc_date",label:"Hora AVC",w:104,fixed:true,left:198},
     {key:"sat_date",label:"Hora SP",w:104},
     {key:"delta_segundos",label:"Δ(s)",w:62},
-    {key:"vehicle_type",label:"Tipo",w:116},
-    {key:"axle_count",label:"Ejes AVC",w:78},
+    {key:"Vehicle_type",label:"Tipo",w:116},
+    {key:"axles_avc",label:"Ejes AVC",w:78},
     {key:"clase_avc_mapeada",label:"Clase AVC",w:92},
     {key:"id_classe",label:"id_classe",w:100},
     {key:"tab_id_classe",label:"tab_id_classe",w:116},
@@ -876,7 +881,9 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
 
       <div style={{display:"flex",gap:2,borderBottom:"1px solid #1e2535",marginBottom:16}}>
         {LANE_TABS.map(t=>{
-          const count=t.id==="all"?allEvents.length:allEvents.filter(e=>(e.tipo||e.status)===t.id).length;
+          const count=t.id==="all"?allEvents.length
+            :t.id==="axle_error"?allEvents.filter(e=>e.tipo==="MATCH"&&String(e.nota_ejes||"").startsWith("ERROR")).length
+            :allEvents.filter(e=>(e.tipo||e.status)===t.id).length;
           const active=activeTab===t.id;
           const color=t.id==="all"?"#4d7fe0":(STATUS_META[t.id]?.color||"#8a9ab5");
           return (
@@ -935,7 +942,8 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
             <tbody>
               {paginated.map((ev,i)=>{
                 const sk=getStatus(ev);
-                const meta=STATUS_META[sk]||STATUS_META.matched;
+                const isAxleErrRow=ev.tipo==="MATCH"&&String(ev.nota_ejes||"").startsWith("ERROR");
+                const meta=isAxleErrRow?STATUS_META.axle_error:(STATUS_META[sk]||STATUS_META.matched);
                 const isSel=selected?.id===ev.id||selected?.avc_id===ev.avc_id;
                 const rowBg=isSel?`${meta.color}18`:i%2===0?"#0d1525":"#0b1020";
                 return (
@@ -1001,7 +1009,7 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
         </div>
 
         <div style={{flex:"0 0 40%",borderLeft:"1px solid #1e2535",overflowY:"auto"}}>
-          <EvidencePanel event={selected}/>
+          <EvidencePanel event={selected} sourceId={laneSourceId}/>
         </div>
       </div>
 

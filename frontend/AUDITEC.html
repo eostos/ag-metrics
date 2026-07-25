@@ -42,10 +42,10 @@
   <script type="text/babel" src="components/MockData.jsx?v=20260525d"></script>
   <script type="text/babel" src="components/Auth.jsx?v=20260525d"></script>
   <script type="text/babel" src="components/Layout.jsx?v=20260529a"></script>
-  <script type="text/babel" src="components/Dashboard.jsx?v=20260609g"></script>
-  <script type="text/babel" src="components/LaneDetail.jsx?v=20260609g"></script>
+  <script type="text/babel" src="components/Dashboard.jsx?v=20260619a"></script>
+  <script type="text/babel" src="components/LaneDetail.jsx?v=20260619a"></script>
   <script type="text/babel" src="components/Config.jsx?v=20260609g"></script>
-  <script type="text/babel" src="components/Reports.jsx?v=20260529a"></script>
+  <script type="text/babel" src="components/Reports.jsx?v=20260617b"></script>
   <script type="text/babel" src="components/Operations.jsx?v=20260529b"></script>
 
   <script type="text/babel">
@@ -280,7 +280,7 @@
 
     const PAGE_TITLES = {
       dashboard: { title: "Dashboard", subtitle: "Resumen de conciliación AVC/SP por carril" },
-      reports:   { title: "Reports",  subtitle: "Report configuration, templates and history" },
+      reports:   { title: "Reports",  subtitle: "Reporte de conciliación e historial de envíos" },
       alarms:    { title: "Alarms", subtitle: "Alarm rules, open alarms and history" },
       notifications: { title: "Notifications", subtitle: "Email notification history and contact groups" },
       settings:  { title: "Settings", subtitle: "Global Email / SMTP Configuration" },
@@ -354,7 +354,7 @@
           {view==="dashboard" && !activeLane && <Dashboard onOpenLane={handleOpenLane} user={user}/>}
           {view==="dashboard" && activeLane   && <LaneDetail laneId={activeLane} initialDate={activeLaneDate} initialFilter={activeLaneFilter} onBack={()=>{setActiveLane(null);setActiveLaneFilter(null);setActiveLaneDate(null);}}/>}
           {viewRoot==="reports" && viewSection==="view" && <ReportsScreen/>}
-          {viewRoot==="reports" && viewSection!=="view" && <ReportsModule section={viewSection || "list"}/>}
+          {viewRoot==="reports" && viewSection!=="view" && <ReportsModule section={viewSection || "history"}/>}
           {viewRoot==="alarms" && user.role==="Admin" && <AlarmsModule section={viewSection || "active"}/>}
           {viewRoot==="notifications" && user.role==="Admin" && <NotificationsModule section={viewSection || "history"}/>}
           {viewRoot==="settings" && user.role==="Admin" && <SettingsModule/>}

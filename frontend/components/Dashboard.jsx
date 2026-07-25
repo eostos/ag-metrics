@@ -109,10 +109,10 @@ function SummaryChart({ lanes, stats }) {
       data:{
         labels: lanes.map(l=>l.id),
         datasets:[
-          {label:"Matched",    data:lanes.map(l=>(stats[l.id]||{}).matched||0),  backgroundColor:"#22c97b",borderRadius:3},
+          {label:"Match OK",   data:lanes.map(l=>{const s=stats[l.id]||{};return Math.max((s.matched||0)-(s.axleErr||0),0);}), backgroundColor:"#22c97b",borderRadius:3},
+          {label:"Error Ejes", data:lanes.map(l=>(stats[l.id]||{}).axleErr||0), backgroundColor:"#f5d433",borderRadius:3},
           {label:"AVC sin SP",data:lanes.map(l=>(stats[l.id]||{}).avcOnly||0), backgroundColor:"#ff7e3f",borderRadius:3},
           {label:"SP sin AVC",data:lanes.map(l=>(stats[l.id]||{}).satOnly||0), backgroundColor:"#5b9cf6",borderRadius:3},
-          {label:"Error Ejes", data:lanes.map(l=>(stats[l.id]||{}).axleErr||0), backgroundColor:"#f5d433",borderRadius:3},
         ],
       },
       options:{
@@ -291,6 +291,10 @@ function Dashboard({ onOpenLane, user }) {
         if (data && data.lanes && data.lanes.length > 0) {
           setConfigs(data.lanes);
           setStats(data.stats||{});
+        } else if (!silent) {
+          // Cambio de fecha explícito a un día sin datos: limpiar el tablero
+          setConfigs([]);
+          setStats({});
         }
         return data;
       })
@@ -560,13 +564,13 @@ function Dashboard({ onOpenLane, user }) {
       {/* KPI strip */}
       <div style={dashStyles.kpiStrip}>
         {[
-          {label:"Eventos AVC",   value:avcBase.toLocaleString(),      color:"#e8edf5",icon:"📷"},
+          {label:"Total Eventos",  value:totalEvents.toLocaleString(),  color:"#e8edf5",icon:"📷"},
           {label:"Coincidencias", value:totalMatched.toLocaleString(), color:"#22c97b",icon:"✅"},
           {label:"AVC sin SP",    value:totalAvcOnly.toLocaleString(), color:"#ff7e3f",icon:"🔶"},
           {label:"SP sin AVC",    value:totalSatOnly.toLocaleString(), color:"#5b9cf6",icon:"🚧"},
           {label:"Detección AVC",
            value:totalEvents>0?`${overallRate}%`:"—",
-           color:overallRate>=97?"#22c97b":overallRate>=94?"#f5d433":totalEvents>0?"#ff4c6a":"#5b6a8a",
+           color:overallRate>=97?"#22c97b":overallRate>=93?"#f5d433":totalEvents>0?"#ff4c6a":"#5b6a8a",
            icon:"📊"},
         ].map(k=>(
           <div key={k.label} style={dashStyles.kpiCard}>
