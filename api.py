@@ -2059,6 +2059,11 @@ def _lane_device_id(source_id: int, lane_name: str) -> str:
 # Δt de respaldo para pedir la foto cuando el carril no tiene medición. Es el
 # valor que estaba fijo en el código; sólo se usa si no hay nada medido.
 _EVIDENCIA_OFFSET_FALLBACK = 60
+# Segundos que se prueban hacia adelante si el instante exacto no tiene
+# grabación. Tres bastan: los huecos medidos son de ~4s y el cruce suele caer
+# en su borde. Cada intento es una llamada más a Alice Guardian, así que no
+# conviene subirlo sin medir antes que los huecos son más anchos.
+_EVIDENCIA_REINTENTOS = 3
 
 
 def _fecha_de_timestamp(value: str) -> str:
@@ -2258,36 +2263,55 @@ def get_sat_evidence_photo(source_id: int, avc_lane: str, sat_timestamp: str,
         desfase = int(oper["offset_s"]) if oper else _EVIDENCIA_OFFSET_FALLBACK
         origen_desfase = oper["resolved"] if oper else "fallback"
 
-    timestamp = _snapshot_unix_value(
-        sat_timestamp,
-        str(config.get("timezone") or load_saved_settings().get("timezone") or "America/Mexico_City"),
-        offset_seconds=desfase,
-    )
-    snapshot = _request_alice_snapshot(config, device_id, timestamp)
-    evidence = snapshot["evidence"]
-    photo_url = str(evidence.get("photo_url") or "")
-    if not evidence.get("photo_available") or not photo_url:
-        raise HTTPException(404, "Alice Guardian no encontró fotografía para esta transacción SP")
-    try:
-        photo_response = _requests.get(
-            photo_url, timeout=snapshot["timeout"], verify=snapshot["verify_ssl"]
+    tz = str(config.get("timezone") or load_saved_settings().get("timezone")
+             or "America/Mexico_City")
+
+    # La grabación tiene huecos de unos pocos segundos: medido el 2026-08-08,
+    # un hueco de 4s (06:59:24–06:59:27) dejaba sin foto justo el instante del
+    # cruce, aunque un segundo después sí la hubiera. Se reintenta desplazando
+    # el instante hacia adelante segundo a segundo antes de darlo por perdido.
+    ultimo_error = None
+    for intento in range(_EVIDENCIA_REINTENTOS + 1):
+        try:
+            snapshot = _request_alice_snapshot(
+                config, device_id,
+                _snapshot_unix_value(sat_timestamp, tz, offset_seconds=desfase + intento),
+            )
+            evidence = snapshot["evidence"]
+            photo_url = str(evidence.get("photo_url") or "")
+            if not evidence.get("photo_available") or not photo_url:
+                ultimo_error = HTTPException(
+                    404, "Alice Guardian no encontró fotografía para esta transacción SP")
+                continue
+            photo_response = _requests.get(
+                photo_url, timeout=snapshot["timeout"], verify=snapshot["verify_ssl"])
+            photo_response.raise_for_status()
+        except HTTPException as exc:
+            ultimo_error = exc
+            continue
+        except Exception as exc:
+            ultimo_error = HTTPException(
+                502, f"No se pudo descargar la fotografía temporal: {exc}")
+            continue
+
+        mime = photo_response.headers.get("Content-Type", "image/jpeg").split(";")[0]
+        payload = snapshot["payload"]
+        return Response(
+            content=photo_response.content,
+            media_type=mime,
+            headers={
+                "X-Alice-Camera": str(payload.get("camera_name") or ""),
+                "X-Alice-Device-ID": device_id,
+                # Trazabilidad: con qué Δt se pidió la foto, de dónde salió y
+                # cuántos segundos hubo que desplazarse para encontrarla.
+                "X-Delta-T": str(desfase + intento),
+                "X-Delta-T-Origen": origen_desfase,
+                "X-Delta-T-Reintento": str(intento),
+            },
         )
-        photo_response.raise_for_status()
-    except Exception as exc:
-        raise HTTPException(502, f"No se pudo descargar la fotografía temporal: {exc}")
-    mime = photo_response.headers.get("Content-Type", "image/jpeg").split(";")[0]
-    payload = snapshot["payload"]
-    return Response(
-        content=photo_response.content,
-        media_type=mime,
-        headers={
-            "X-Alice-Camera": str(payload.get("camera_name") or ""),
-            "X-Alice-Device-ID": device_id,
-            # Trazabilidad: con qué Δt se pidió la foto y de dónde salió.
-            "X-Delta-T": str(desfase),
-            "X-Delta-T-Origen": origen_desfase,
-        },
-    )
+
+    raise ultimo_error or HTTPException(
+        404, "Alice Guardian no encontró fotografía para esta transacción SP")
 
 
 # ─────────────────────────────────────────────────────────
