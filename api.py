@@ -612,13 +612,24 @@ def _resolve_lane_offset(lane: str, fecha: str) -> Optional[Dict]:
     with _db() as c:
         hoy = c.execute("SELECT * FROM lane_offsets WHERE lane_name=? AND offset_date=?",
                         (lane, fecha)).fetchone()
-        if hoy and (hoy["sharpness"] or 0) >= _OFFSET_MIN_SHARPNESS:
-            return {**dict(hoy), "resolved": "medido", "age_days": 0,
-                    "window_s": hoy["offset_s"] + _OFFSET_MARGEN_MEDIDO}
         prev = c.execute(
             "SELECT * FROM lane_offsets WHERE lane_name=? AND offset_date<? AND sharpness>=? "
             "ORDER BY offset_date DESC LIMIT 1",
             (lane, fecha, _OFFSET_MIN_SHARPNESS)).fetchone()
+
+    if hoy and (hoy["sharpness"] or 0) >= _OFFSET_MIN_SHARPNESS:
+        # En un cambio de régimen (una sincronización de reloj) el día contiene
+        # los DOS desfases: los eventos previos al ajuste siguen al viejo. La
+        # ventana tiene que abarcar ambos o se pierden los del régimen anterior.
+        # Medido el 2026-08-08, cuando el Δt cayó de 170 a 64 a media mañana:
+        # con la ventana ceñida al Δt nuevo se pierden 155 emparejamientos y el
+        # resultado sale PEOR que no corregir nada (1655 correctos frente a
+        # 1963); abarcando ambos regímenes sube a 2094.
+        alto = hoy["offset_s"]
+        if prev and abs(prev["offset_s"] - hoy["offset_s"]) > _OFFSET_MARGEN_MEDIDO:
+            alto = max(alto, prev["offset_s"])
+        return {**dict(hoy), "resolved": "medido", "age_days": 0,
+                "window_s": alto + _OFFSET_MARGEN_MEDIDO}
 
     if prev:
         edad = (date.fromisoformat(fecha) - date.fromisoformat(prev["offset_date"])).days
@@ -2219,19 +2230,33 @@ async def test_source_evidence(request: Request, user=Depends(_require_admin)):
 
 @app.get("/api/sat-evidence/photo")
 def get_sat_evidence_photo(source_id: int, avc_lane: str, sat_timestamp: str,
+                           delta_s: Optional[int] = None,
                            user=Depends(_get_user)):
+    """
+    Fotografía del vehículo en el instante en que cruzó el detector.
+
+    El vehículo cruza Δt segundos después del registro SP, así que la foto se
+    pide a la hora del SP MÁS ese desfase.
+
+    `delta_s` es el `delta_segundos` de la fila conciliada (negativo cuando el
+    SP precede al AVC). Cuando el evento tiene pareja conocemos el desfase
+    EXACTO de ese vehículo, que es siempre mejor que el Δt medio del carril:
+    en un día con cambio de régimen —el 2026-08-08, cuando el reloj se
+    sincronizó a media mañana— usar el Δt del día devolvía una foto 87s antes
+    del cruce, con el carril vacío. Sin `delta_s` se cae al Δt del carril, que
+    es lo único disponible para un SP sin conciliar.
+    """
     config = _source_evidence_config(source_id)
     device_id = _lane_device_id(source_id, avc_lane)
 
-    # El vehículo cruza el detector Δt segundos después del registro SP, así que
-    # la foto hay que pedirla a la hora del SP MÁS ese Δt. El desfase es propio
-    # de cada carril y deriva ~1s/día, de modo que se toma el medido para ese
-    # carril y ese día. Antes era un 60 fijo, cuando los reales rondan 85-135s:
-    # pedir la foto 30-70s antes del cruce devolvía el vehículo equivocado.
     fecha_sp = _fecha_de_timestamp(sat_timestamp)
-    oper = _resolve_lane_offset(avc_lane, fecha_sp) if fecha_sp else None
-    desfase = int(oper["offset_s"]) if oper else _EVIDENCIA_OFFSET_FALLBACK
-    origen_desfase = oper["resolved"] if oper else "fallback"
+    if delta_s is not None:
+        desfase = -int(delta_s)          # delta_segundos = sat_ts - avc_ts
+        origen_desfase = "evento"
+    else:
+        oper = _resolve_lane_offset(avc_lane, fecha_sp) if fecha_sp else None
+        desfase = int(oper["offset_s"]) if oper else _EVIDENCIA_OFFSET_FALLBACK
+        origen_desfase = oper["resolved"] if oper else "fallback"
 
     timestamp = _snapshot_unix_value(
         sat_timestamp,

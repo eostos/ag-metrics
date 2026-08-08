@@ -344,6 +344,14 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
       avc_lane:laneId,
       sat_timestamp:satTs,
     });
+    // Si el evento está conciliado conocemos el desfase EXACTO de ese vehículo;
+    // usarlo en vez del Δt medio del carril evita pedir la foto de otro momento
+    // (en un día con cambio de reloj el Δt del día se desvía decenas de segundos).
+    const dsRaw = event && event.delta_segundos;
+    const ds = parseInt(dsRaw, 10);
+    if (dsRaw !== "" && dsRaw !== null && dsRaw !== undefined && !isNaN(ds)) {
+      params.set("delta_s", String(ds));
+    }
     fetch(`/api/sat-evidence/photo?${params.toString()}`, {
       headers:{Authorization:`Bearer ${window.API.token()}`},
     })
@@ -362,7 +370,7 @@ function EventModal({ event, laneId, sourceId, onClose, onPrevious, onNext, hasP
       })
       .catch(err=>setSatSnapshotError(err.message||String(err)));
     return ()=>{ if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  },[satTs,laneId,sourceId]);
+  },[satTs,laneId,sourceId,event&&event.delta_segundos]);
 
   function handleBackdrop(e) { if (e.target === e.currentTarget) onClose(); }
 
