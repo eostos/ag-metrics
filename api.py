@@ -79,6 +79,13 @@ def _db() -> sqlite3.Connection:
 
 
 def _ensure_schema() -> None:
+    # app_settings se crea con su propia conexión ANTES de abrir la de abajo. La
+    # migración del final de esta función llama a load_saved_settings(), que
+    # abriría una segunda conexión para crear esa tabla mientras ésta retiene el
+    # bloqueo de escritura: en una base nueva eso es un interbloqueo del que no
+    # se sale solo, porque avc_sources sigue vacía y el arranque vuelve a entrar
+    # por la misma rama. Con la tabla ya creada, la llamada de dentro sólo lee.
+    ensure_settings_db()
     with _db() as c:
         c.executescript("""
         -- Usuarios y sesiones
@@ -567,7 +574,17 @@ _RECON_WINDOW_S = 120
 # Versión del resumen guardado en recon_cache. Se sube al cambiar cómo se
 # concilia o qué métricas lleva el resumen: el caché anterior se recalcula solo.
 # 2 = ventana derivada del Δt + métricas de elusión de motos.
-_RECON_SCHEMA_VERSION = 2
+# 3 = banda de clase: un SP clavado en el Δt empareja aunque la clase difiera.
+_RECON_SCHEMA_VERSION = 3
+
+# Segundos alrededor del Δt dentro de los cuales se acepta un SP de clase
+# distinta. Un SP a esa distancia es del mismo vehículo; que las clases no
+# coincidan es un desacuerdo de clasificación, no dos vehículos. Sin esto el
+# motor emitía dos anomalías por vehículo —AVC huérfano y SP huérfano— e
+# inflaba ambos lados: medido en Carril-7 el 2026-08-04, de 58 "SP sin AVC"
+# sólo 6 eran no-detección real. El valor es plano entre 15 y 40 s (mismo
+# resultado), así que 20 no es un ajuste fino sino el centro de una meseta.
+_BANDA_CLASE_S = 20
 
 # Nitidez mínima para dar por bueno un pico de correlación (ver estimar_offset).
 _OFFSET_MIN_SHARPNESS = 2.5
@@ -789,6 +806,7 @@ def _reconcile_date_cache(day_str: str) -> None:
                     ac["date"], ac["device"], ac["type"], ac["axles"], ac["id"],
                     sc["date"], sc["voie"], sc["cls"], sc["tab"], sc["num"], sc["prix"],
                     offset_s=int((oper or {}).get("offset_s") or 0),
+                    banda_clase=_BANDA_CLASE_S,
                 )
                 if not result.empty:
                     resumen = _recon_summary(result)
@@ -2750,6 +2768,7 @@ async def run_reconcile(request: Request, user=Depends(_get_user)):
             ac["date"], ac["device"], ac["type"], ac["axles"], ac["id"],
             sc["date"], sc["voie"], sc["cls"], sc["tab"], sc["num"], sc["prix"],
             offset_s=int((oper_win or {}).get("offset_s") or 0),
+            banda_clase=_BANDA_CLASE_S,
         )
     except Exception as exc:
         return {"error": f"Error en conciliación: {exc}"}

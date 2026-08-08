@@ -29,6 +29,22 @@ function satClassCode(raw) {
   return SAT_CODE[n] || `cls${n}`;
 }
 
+// ¿El AVC y la caseta clasificaron distinto el mismo vehículo? Se deduce aquí
+// con los campos que ya trae la fila —misma regla exacta que is_class_compatible
+// en engine.py— para no añadir un campo nuevo al backend sólo para pintarlo.
+// Ojo: cuando los ejes coinciden, nota_ejes vale "OK" y el desacuerdo de clase
+// no se ve por ningún otro lado de la tabla.
+function hasClassDiscrepancy(ev) {
+  if ((ev.tipo || ev.status) !== "MATCH") return false;
+  const avc = parseInt(ev.clase_avc_mapeada, 10);
+  if (isNaN(avc) || avc === 0) return true;   // AVC sin clase válida
+  const sc = parseInt(ev.id_classe, 10) || 0;
+  const tc = parseInt(ev.tab_id_classe, 10) || 0;
+  return avc !== sc && avc !== tc;
+}
+const CLASS_DISC_BG = "rgba(245,212,51,0.16)";
+const CLASS_DISC_FG = "#f5d433";
+
 const STATUS_META = {
   matched:    {label:"Coincidencia", color:"#22c97b", bg:"rgba(34,201,123,0.08)", icon:"✓"},
   avc_only:   {label:"AVC sin SP",   color:"#ff7e3f", bg:"rgba(255,126,63,0.08)", icon:"◎"},
@@ -903,6 +919,13 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
           <span style={{color:"#5b6a8a"}}>solo eventos con diferencia AVC/SP</span>
         </div>
       )}
+      {allEvents.some(hasClassDiscrepancy) && (
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:11,color:"#8a9ab5"}}>
+          <span style={{display:"inline-block",width:22,height:11,borderRadius:2,background:CLASS_DISC_BG,border:`1px solid ${CLASS_DISC_FG}55`}}/>
+          <span>Lado SP en amarillo: el AVC y la caseta clasificaron distinto el mismo vehículo
+            ({allEvents.filter(hasClassDiscrepancy).length})</span>
+        </div>
+      )}
 
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
         <div style={{flex:"0 0 60%",overflowY:"auto",overflowX:"auto"}}>
@@ -947,6 +970,13 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
                 const meta=isAxleErrRow?STATUS_META.axle_error:(STATUS_META[sk]||STATUS_META.matched);
                 const isSel=selected?.id===ev.id||selected?.avc_id===ev.avc_id;
                 const rowBg=isSel?`${meta.color}18`:i%2===0?"#0d1525":"#0b1020";
+                // Discrepancia de clase: se marca SÓLO el lado SP de la fila.
+                // Media fila en vez de la fila entera para no confundirla con
+                // un error de ejes, que sí tiñe la fila completa.
+                const spCell=hasClassDiscrepancy(ev)
+                  ? {background:CLASS_DISC_BG,color:CLASS_DISC_FG}
+                  : null;
+                const spTitle=spCell?`Clase discrepante — AVC ${satClassCode(ev.clase_avc_mapeada)} vs SP ${satClassCode(ev.id_classe)}`:undefined;
                 return (
                   <tr key={ev.id||ev.avc_id||i}
                     onClick={()=>setSelected(isSel?null:ev)}
@@ -955,14 +985,14 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
                     <td style={{...ldStyles.td,...stickyCell(COLS[0],rowBg)}}>{ev.id||ev.avc_id||i+1}</td>
                     <td style={{...ldStyles.td,...stickyCell(COLS[1],rowBg)}}><span style={{color:meta.color,fontSize:11,fontWeight:600}}>{meta.icon} {meta.label}</span></td>
                     <td style={{...ldStyles.td,...stickyCell(COLS[2],rowBg),fontFamily:"monospace",fontSize:13,fontWeight:700,color:"#e8edf5"}}>{(ev.avc_date||ev.event_mexico||ev.avcTime||"—").slice(11,19)||ev.avc_date||"—"}</td>
-                    <td style={{...ldStyles.td,fontFamily:"monospace",fontSize:13,fontWeight:700,color:!ev.sat_date?"#243358":"#e8edf5"}}>{ev.sat_date?"" + ev.sat_date.slice(11,19):"—"}</td>
+                    <td title={spTitle} style={{...ldStyles.td,fontFamily:"monospace",fontSize:13,fontWeight:700,color:!ev.sat_date?"#243358":"#e8edf5",...(spCell||{})}}>{ev.sat_date?"" + ev.sat_date.slice(11,19):"—"}</td>
                     <td style={{...ldStyles.td,color:"#5b6a8a"}}>{ev.delta_segundos||"—"}</td>
                     <td style={ldStyles.td}>{ev.vehicle_type||ev.Vehicle_type||ev.vType||"—"}</td>
                     <td style={{...ldStyles.td,textAlign:"center"}}>{ev.axle_count||ev.axles_avc||"—"}</td>
                     <td style={ldStyles.td}>{satClassCode(ev.clase_avc_mapeada)}</td>
-                    <td style={ldStyles.td}>{satClassCode(ev.id_classe)}</td>
-                    <td style={ldStyles.td}>{satClassCode(ev.tab_id_classe)}</td>
-                    <td style={{...ldStyles.td,color:"#22c97b"}}>{ev.sat_prix||ev.amount||"—"}</td>
+                    <td title={spTitle} style={{...ldStyles.td,...(spCell||{})}}>{satClassCode(ev.id_classe)}</td>
+                    <td title={spTitle} style={{...ldStyles.td,...(spCell||{})}}>{satClassCode(ev.tab_id_classe)}</td>
+                    <td title={spTitle} style={{...ldStyles.td,color:"#22c97b",...(spCell||{})}}>{ev.sat_prix||ev.amount||"—"}</td>
                     <td style={{...ldStyles.td,...stickyActionCell(rowBg),textAlign:"center",whiteSpace:"nowrap"}}>
                       {(ev.vehicle_image_url||ev.avc_image_url||ev.vehicle_image_path||ev.sat_date) && (
                         <button onClick={e=>{e.stopPropagation();setModalEvent(ev);}} style={ldStyles.camBtn} title="Ver evidencia">📷</button>

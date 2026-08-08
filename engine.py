@@ -590,19 +590,20 @@ def detect_col(cols, patterns, exclude=None):
 
 
 def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
-                  ventana, after_tol, offset_s: int = 0):
+                  ventana, after_tol, offset_s: int = 0, banda_clase: int = 0):
     """
     Alineación de secuencias SP<->AVC por programación dinámica (Needleman-Wunsch).
 
     Reglas (spec de conciliación):
       - SP ocurre ANTES que AVC: delta = sat_ts - avc_ts debe estar en
         [-ventana, +after_tol].
-      - Compatibilidad de clase OBLIGATORIA (is_class_compatible). Moto solo
-        empareja con moto.
+      - Compatibilidad de clase (is_class_compatible). Moto solo empareja con
+        moto, salvo por la banda descrita abajo.
       - Monotonicidad: los matches no se cruzan en el tiempo (ambas listas
         deben venir ordenadas ascendentemente por hora).
-    Objetivo lexicográfico: (1) maximizar nº de matches válidos, luego
-    (2) minimizar la suma de |delta + offset_s| (desempate por proximidad).
+    Objetivo lexicográfico: (1) maximizar nº de matches de clase compatible,
+    (2) maximizar nº de matches por banda, (3) minimizar la suma de
+    |delta + offset_s| (desempate por proximidad).
 
     `offset_s` es el desfase propio del carril: los segundos que el SP precede
     al AVC. El desempate mide la distancia a ESE valor, no a cero, porque en un
@@ -610,13 +611,34 @@ def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
     pegado en el tiempo es el del vehículo anterior. Con offset_s=0 el
     comportamiento es idéntico al histórico.
 
+    `banda_clase` son los segundos alrededor del Δt dentro de los cuales se
+    acepta un SP aunque su clase NO coincida con la del AVC. Un SP que cae
+    clavado en el desfase del carril es del mismo vehículo: que las clases
+    difieran es un desacuerdo de clasificación, no dos vehículos distintos.
+    Sin esta banda el motor parte ese vehículo en dos anomalías —un AVC
+    huérfano y un SP huérfano— e infla ambos lados a la vez. Con
+    banda_clase=0 el comportamiento es idéntico al histórico.
+
     Devuelve dict {indice_avc: indice_sat} con la asignación óptima.
     Memoria O(n*m) en un bytearray de retroceso; valores en filas rodantes.
     """
     n, m = len(avc_ts), len(sat_ts)
     if n == 0 or m == 0:
         return {}
-    BIG = 10 ** 6
+    # Dos niveles: un match de clase compatible vale más que CUALQUIER cantidad
+    # de matches por banda (10**12 frente a 1100 x 10**6 como mucho), así que
+    # estos últimos jamás pueden desplazar a aquellos. Sin esa jerarquía el DP
+    # sacrifica emparejamientos buenos para ganar uno extra: medido, 8 matches
+    # perdidos y 10 reemparejados en un solo día.
+    BIG = 10 ** 12
+    # El match por banda vale en SEGUNDOS, no una constante que aplaste al
+    # desempate: así sólo se acepta si el desplazamiento que provoca en cadena
+    # cuesta menos que eso. Con un valor grande el DP encadenaba un match nuevo
+    # a costa de mandar otro a 139s de su Δt —el vehículo equivocado, y la foto
+    # de evidencia equivocada—. Medido sobre 3 carriles: con 10**6 aparece 1
+    # emparejamiento >100s que antes no existía; con <=150 desaparece y sólo se
+    # pierde 1 match de 159. La meseta va de 60 a 150, así que no es fino.
+    BIG_BANDA = 100
     W = m + 1
     bt = bytearray((n + 1) * W)   # 0=diag(match) 1=arriba(skip AVC) 2=izq(skip SAT)
     for j in range(1, W):
@@ -639,14 +661,25 @@ def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
             else:
                 best = left; b = 2
             jj = j - 1
-            if loj <= jj < hij and jj not in excluded_set and \
-               is_class_compatible(ai_cls, sat_cls[jj], sat_tab[jj]):
+            if loj <= jj < hij and jj not in excluded_set:
                 delta = sat_ts[jj] - ai_ts
                 if -ventana <= delta <= after_tol:
-                    # distancia al desfase esperado del carril, no a cero
-                    cand = prev[j - 1] + BIG - abs(delta + offset_s)
-                    if cand > best:
-                        best = cand; b = 0
+                    compat = is_class_compatible(ai_cls, sat_cls[jj], sat_tab[jj])
+                    # La moto queda FUERA de la banda. Su elusión es normal
+                    # (~95% pasa sin cobro), así que una moto sin transacción
+                    # es el resultado correcto; dejarla emparejar por cercanía
+                    # le adjudica el cobro del vehículo de al lado. Medido: las
+                    # 3 motos que ganaba la banda se llevaban tarifa de auto.
+                    eff_sat = sat_tab[jj] if sat_cls[jj] == 0 else sat_cls[jj]
+                    moto = ai_cls == 15 or eff_sat == 15
+                    en_banda = (banda_clase and not moto
+                                and abs(delta + offset_s) <= banda_clase)
+                    if compat or en_banda:
+                        # distancia al desfase esperado del carril, no a cero
+                        cand = (prev[j - 1] + (BIG if compat else BIG_BANDA)
+                                - abs(delta + offset_s))
+                        if cand > best:
+                            best = cand; b = 0
             cur[j] = best
             bt[rowbase + j] = b
         prev = cur
@@ -751,6 +784,7 @@ def reconcile(
     col_sat_prix: str,
     progress_callback=None,
     offset_s: int = 0,
+    banda_clase: int = 0,
 ) -> pd.DataFrame:
     avc_df = avc_df.copy()
     sat_df = sat_df.copy()
@@ -843,7 +877,7 @@ def reconcile(
     ]
     avc_assign = align_avc_sat(
         avc_ts_all, avc_cls_all, sat_ts_s, sat_cls_pre, sat_tab_pre,
-        excluded_sat, ventana, _SAT_AFTER_TOLERANCE, offset_s,
+        excluded_sat, ventana, _SAT_AFTER_TOLERANCE, offset_s, banda_clase,
     )
 
     for i in range(n_avc):
@@ -895,11 +929,22 @@ def reconcile(
             tc = int(float(tc_val or 0))
             comp_id, comp_tab, nota = compare_ejes(ax, sc, tc)
             dir_delta = f"SAT_antes_AVC_{abs(round(delta_sel))}s" if delta_sel <= 0 else f"SAT_despues_AVC_{round(delta_sel)}s_ATIPICO"
-            obs = (
-                "Motocicleta conciliada" if nota == "OK_MOTO"
-                else "Match correcto - ejes coinciden" if nota == "OK"
-                else f"Match valido - error deteccion ejes AVC: {nota}"
-            )
+            # Un match emparejado por banda tiene las clases en desacuerdo. Hay
+            # que decirlo aquí: con los ejes coincidiendo, compare_ejes devuelve
+            # "OK" y la fila afirmaría "Match correcto" sobre un vehículo que el
+            # AVC y la caseta clasificaron distinto — que es justo el hallazgo.
+            clase_ok = is_class_compatible(avc_cls, sc, tc)
+            if not clase_ok:
+                obs = (f"Match valido - discrepancia de clase AVC:{avc_cls} "
+                       f"SP:{tc if sc == 0 else sc}")
+                if nota.startswith("ERROR"):
+                    obs += f" + {nota}"
+            else:
+                obs = (
+                    "Motocicleta conciliada" if nota == "OK_MOTO"
+                    else "Match correcto - ejes coinciden" if nota == "OK"
+                    else f"Match valido - error deteccion ejes AVC: {nota}"
+                )
             rows.append(
                 {
                     "tipo": "MATCH",
