@@ -66,6 +66,8 @@ Read `PROJECT_CONTEXT.md` before working on any task.
 
 - The `tipo` field on reconciliation rows is one of: `"MATCH"`, `"AVC"`, `"SAT"`, `"SP_EXCLUDED"`. The fourth value marks SAT events excluded from reconciliation (`id_obs_mp==30 AND id_classe==0 AND id_paiement==0`).
 - `match_valido` is `True` only for `MATCH` rows (not for axle-error matches — those are still valid matches).
-- SAT events are expected to arrive **before** the AVC event (SAT records the toll charge; AVC records the physical detection). The default window is 120s before AVC + 30s after.
+- SAT events are expected to arrive **before** the AVC event (SAT records the toll charge; AVC records the physical detection). The gap is the lane's **Δt**, and it is measured — not assumed. The reconciliation window is derived as `Δt + 30`; `_RECON_WINDOW_S` (120) is only a fallback. Δt drifts ~1s/day, so it is re-measured twice daily and inherited across days. **Read `docs/delta-t-guide.md` before changing anything time-related** — window, matching, tie-break, or evidence-photo timing.
+- Motorcycle evasion is normal (~95% in lanes 7 and 8). `moto_detectada_solo_por_avc` rows are correct output, not a bug to fix, and motorcycles are excluded from detection metrics so the ratio measures detection quality.
+- After changing reconciliation logic or summary keys, bump `_RECON_SCHEMA_VERSION`. The Dashboard reads `recon_cache` while lane views recompute live; without the bump the two diverge silently.
 - AVC lane names and SAT voie identifiers are **not** the same namespace — the lane mapping config bridges them.
 - The `app_settings.db` file is a runtime artifact — never commit it, never hard-code its path.

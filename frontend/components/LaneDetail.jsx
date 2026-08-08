@@ -683,7 +683,8 @@ function LaneDetail({ laneId, onBack, initialDate, initialFilter }) {
       avc_lane: laneId,
       sat_lane: lane,
       date,
-      window_s: 120,
+      // Sin window_s: la ventana la deriva el backend del Δt medido del carril.
+      // Forzarla aquí haría que esta vista mostrara cifras distintas del Dashboard.
     })
       .then(data => {
         if (requestId !== reconcileRequestRef.current) return;

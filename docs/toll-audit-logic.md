@@ -8,19 +8,86 @@ The reconciliation engine compares AVC events to SAT transactions for the same l
 
 ## Time Window Matching
 
-Each AVC event is matched to a SAT transaction using a time window search (binary search for efficiency):
+Each AVC event is matched to a SAT transaction within an asymmetric time window:
 
 - **Search window:** `[AVC_timestamp - window_s, AVC_timestamp + 30s]`
-- **Default window_s:** 120 seconds (configurable per reconciliation request)
-- **Direction priority:** SAT events arriving **before** the AVC event are preferred (delta ≤ 0). This reflects the physical reality: the toll gate charges the vehicle (SAT) before or at the moment of AVC detection.
-- **Tolerance:** 30 seconds of tolerance for clock skew (AVC arriving slightly before SAT timestamp).
+- **Direction:** SAT occurs **before** AVC — the gate charges the vehicle, then the vehicle crosses the sensor.
+- **Tolerance:** 30 s after the AVC event (`_SAT_AFTER_TOLERANCE`) for clock skew.
+
+### window_s is derived, not fixed
+
+`window_s` is **not** a constant. It is computed per lane and per day from that
+lane's measured Δt (SP→AVC offset):
+
+```
+window_s = Δt + 30      (or Δt + 40 when Δt is inherited from a previous day)
+```
+
+`_RECON_WINDOW_S` (120) survives only as a fallback when no Δt can be resolved.
+A `window_s` passed explicitly in the `/api/reconcile` body still overrides the
+derived value — used by the analysis panel and by tests.
+
+**This matters:** Δt drifts ~1 s/day, and a lane whose Δt exceeds the window can
+never reach its correct SP transaction. Carril-8 crossed the old fixed 120 s on
+2026-07-10 and mis-paired ~96 % of its matches until the window was derived.
+
+See **`docs/delta-t-guide.md`** for how Δt is measured, stored, inherited and
+applied.
 
 ### Candidate Selection
 
-Among all SAT candidates in the window:
-1. First, class-compatible candidates are collected.
-2. Sorted by: (SAT before AVC = priority 0, SAT after AVC = priority 1), then by `abs(delta)`.
-3. The first class-compatible candidate is chosen.
+Pairing is a **global sequence alignment** (Needleman-Wunsch dynamic
+programming) in `align_avc_sat()`, not a greedy per-event choice — greedy
+matching was replaced in commit `ae4867c4`.
+
+Lexicographic objective:
+1. Maximise the number of valid matches (dominates unconditionally)
+2. Minimise `sum(abs(delta + offset_s))` as a tie-break
+
+Distance is measured from the lane's Δt, not from zero: in a lane offset by
+133 s the correct partner sits at 133 s, while the temporally closest SP belongs
+to the *previous* vehicle. Monotonicity is guaranteed — matches never cross in
+time, so both series must be sorted ascending (they are, in `reconcile()`).
+
+---
+
+## Reconciliation Pipeline — Triggers and Caching
+
+Reconciliation runs unattended. Nothing here depends on a browser being open.
+
+```
+SP batches (SFTP) ──► sat_watcher.py ──► ~/sat_merged/SAT-…-MERGED.json
+                      (systemd user service, linger enabled)
+
+AVC source ──► _avc_sync_scheduler_loop()  every 300 s
+                 └─ _fetch_and_store()
+                      ├─ event_date derived from the event's own timestamp
+                      ├─ on changed records: DELETE recon_cache for touched dates
+                      └─ immediately re-launch reconciliation for those dates
+
+_auto_reconcile_scheduler_loop()  every 300 s, last RECONCILE_AUTO_DAYS_BACK days
+  └─ reconciles a date when the merged SP file is newer than its cache,
+     OR when _cache_obsoleto(fecha) finds a summary from an older schema
+       └─ _reconcile_date_cache(day_str)      per-day file lock
+            └─ per lane: _ventana_para_carril()  ← window + offset from Δt
+                         reconcile(…)
+                         _recon_summary() + _info_ventana()
+                         _save_cache()   under both source_id and 0
+```
+
+### Two things that bite
+
+**The Dashboard reads cache; lane views recompute live.** `/api/lanes` serves
+stored summaries while `POST /api/reconcile` recalculates. If the two disagree,
+suspect a stale cache before suspecting the engine. `_RECON_SCHEMA_VERSION`
+exists precisely for this — bump it whenever reconciliation logic or summary keys
+change and stale caches rebuild themselves.
+
+**Cache invalidation must be followed by re-reconciliation.** When
+`_fetch_and_store` drops caches for dates it touched, it now relaunches those
+dates immediately. Without that, `/api/lanes/{id}/events` falls back to raw local
+events (`source: "local"`) until the scheduler catches up — a window of up to
+five minutes in which the UI shows unreconciled numbers.
 
 ---
 

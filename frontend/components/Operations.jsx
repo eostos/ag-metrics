@@ -208,6 +208,7 @@ const MOTIVE_LABELS_MAP = {
   SAT_no_detecto:"AVC sin SP en ventana", clase_distinta:"Clase incompatible",
   error_conteo_avc:"Error conteo AVC", moto_detectada_solo_por_avc:"Moto solo AVC",
   AVC_no_detecto:"SP sin AVC", moto_SAT_sin_AVC:"Moto SP sin AVC", SAT_clase_indefinida:"SP clase indefinida",
+  SP_compatible_fuera_de_ventana:"SP compatible fuera de ventana",
 };
 
 function openPrintableReport(form, preview, hourly, targetWin) {

@@ -47,6 +47,7 @@ from engine import (
     parse_date,
     reconcile,
     save_settings,
+    estimar_offset,
 )
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,13 @@ AVC_SYNC_INTERVAL_SECONDS = int(os.environ.get("AUDITEC_AVC_SYNC_INTERVAL_SECOND
 AVC_SYNC_ENABLED = os.environ.get("AUDITEC_AVC_SYNC_ENABLED", "1").lower() not in ("0", "false", "no")
 RECONCILE_AUTO_INTERVAL_SECONDS = int(os.environ.get("AUDITEC_RECONCILE_INTERVAL_SECONDS", "300"))
 RECONCILE_AUTO_DAYS_BACK = int(os.environ.get("AUDITEC_RECONCILE_DAYS_BACK", "3"))
+# Δt por carril: dos pasadas al día. A las 08:00 el valor del día ya es el
+# definitivo en todos los carriles, así que la de las 09h valida temprano (un
+# salto de reloj nocturno se detecta esa misma mañana) y la de las 23h
+# consolida el valor del día completo, que es el que hereda el día siguiente.
+OFFSET_RUN_HOURS = [int(h) for h in
+                    os.environ.get("AUDITEC_OFFSET_RUN_HOURS", "9,23").split(",") if h.strip()]
+OFFSET_CHECK_INTERVAL_SECONDS = int(os.environ.get("AUDITEC_OFFSET_CHECK_INTERVAL_SECONDS", "600"))
 
 app = FastAPI(title="AG-metrics API", docs_url="/api/docs")
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
@@ -124,6 +132,22 @@ def _ensure_schema() -> None:
             summary_json TEXT NOT NULL,
             source_id    INTEGER,
             created_at   TEXT NOT NULL
+        );
+
+        -- Desfase temporal SP->AVC estimado por carril y día (vigilancia de
+        -- deriva de reloj). Informativo: no altera la conciliación.
+        CREATE TABLE IF NOT EXISTS lane_offsets (
+            lane_name   TEXT NOT NULL,
+            offset_date TEXT NOT NULL,
+            offset_s    INTEGER NOT NULL,
+            peak        INTEGER,
+            coverage    REAL,
+            sharpness   REAL,
+            n_avc       INTEGER,
+            n_sat       INTEGER,
+            origin      TEXT NOT NULL DEFAULT 'auto',
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (lane_name, offset_date)
         );
         """)
 
@@ -329,6 +353,8 @@ def _fetch_and_store(source_id: int, source_type: str, source_config: Dict,
     ac = _auto_cols_avc(df)
 
     changed_records = 0
+    fechas_tocadas: set = set()
+    invalidadas: List[str] = []
     with _db() as c:
         for _, row in df.iterrows():
             event_id = str(row.get(ac["id"], "") or row.get("id", ""))
@@ -358,34 +384,68 @@ def _fetch_and_store(source_id: int, source_type: str, source_config: Dict,
             if not existing or tuple(existing) != new_values:
                 changed_records += 1
 
+            # event_date sale del timestamp del PROPIO evento, no de la fecha
+            # consultada. La fuente devuelve a veces registros de la frontera del
+            # día o tardíos; sellarlos con la fecha pedida los dejaba invisibles
+            # para reconcile(), que filtra por timestamp: se perdían de los dos
+            # días. Si el timestamp no parsea se cae a la fecha consultada.
+            ts_parsed = parse_date(ts)
+            fecha_evento = (ts_parsed.strftime("%Y-%m-%d")
+                            if not pd.isna(ts_parsed) else date_str)
+            fechas_tocadas.add(fecha_evento)
+
             c.execute("""
                 INSERT OR REPLACE INTO avc_local_events
                 (event_id,source_id,event_date,lane_name,vehicle_type,axle_count,
                  event_timestamp,vehicle_image_url,vehicle_image_path,extra_json,synced_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """, (event_id, source_id, date_str, lane_val, vtype, axles_int,
+            """, (event_id, source_id, fecha_evento, lane_val, vtype, axles_int,
                   ts, img_url, img_path, extra, synced_at))
 
         c.execute("UPDATE avc_sources SET last_sync=? WHERE id=?", (synced_at, source_id))
         if changed_records:
-            # Invalidar caché de conciliación para esta fecha: los timestamps pueden haber cambiado.
-            c.execute("DELETE FROM recon_cache WHERE cache_key LIKE ?", (f"%::{date_str}",))
+            # Invalidar caché de conciliación de TODAS las fechas tocadas, no sólo
+            # la consultada: un evento de la frontera invalida también su día.
+            invalidadas = sorted(fechas_tocadas | {date_str})
+            for f in invalidadas:
+                c.execute("DELETE FROM recon_cache WHERE cache_key LIKE ?", (f"%::{f}",))
+
+    if changed_records:
+        # Rehacer ya lo invalidado. Sin esto queda un hueco de hasta 5 minutos
+        # (el periodo del scheduler) en el que las vistas caen a eventos locales
+        # sin conciliar: el Dashboard y el detalle muestran cifras que no son las
+        # de la conciliación, y el día "no carga bien".
+        for f in invalidadas:
+            _start_reconcile_date_cache(f.replace("-", ""))
 
     df.attrs["changed_records"] = changed_records
     return df
 
 
 def _events_from_local(source_id: Optional[int], event_date: date,
-                        lane: Optional[str] = None) -> pd.DataFrame:
-    """Devuelve eventos desde avc_local_events (ya sincronizados)."""
+                        lane: Optional[str] = None,
+                        margin_days: int = 0) -> pd.DataFrame:
+    """
+    Devuelve eventos desde avc_local_events (ya sincronizados).
+
+    `margin_days` amplía la carga a los días vecinos. Hace falta porque en 68 de
+    318.390 eventos la columna event_date no coincide con la fecha de
+    event_timestamp (siempre un día por delante, sobre todo a las 23h). Como
+    reconcile() filtra por el timestamp, esos eventos se caían de los DOS días:
+    del suyo porque no se cargaban, y del guardado porque el filtro los descarta.
+    Sólo deben pedir margen los llamadores que después filtran por timestamp.
+    """
     date_str = event_date.isoformat()
+    fechas = [ (event_date + timedelta(days=k)).isoformat()
+               for k in range(-margin_days, margin_days + 1) ]
+    marcas = ",".join("?" * len(fechas))
     with _db() as c:
         if source_id:
-            base = "SELECT * FROM avc_local_events WHERE source_id=? AND event_date=?"
-            args: list = [source_id, date_str]
+            base = f"SELECT * FROM avc_local_events WHERE source_id=? AND event_date IN ({marcas})"
+            args: list = [source_id] + fechas
         else:
-            base = "SELECT * FROM avc_local_events WHERE event_date=?"
-            args = [date_str]
+            base = f"SELECT * FROM avc_local_events WHERE event_date IN ({marcas})"
+            args = list(fechas)
         if lane:
             base += " AND lane_name=?"
             args.append(lane)
@@ -473,9 +533,213 @@ def _recon_summary(result: pd.DataFrame) -> Dict:
     avc_base = max(total - sat_only, 1)   # AVC events (matched + avc_only)
     # Tasa de detección = AVC eventos / (AVC eventos + SAT-sin-AVC) = avc_base / total
     detect_rate = round(avc_base / max(total, 1) * 100, 1)
+
+    # Elusión de motos. En los carriles 7 y 8 alrededor del 95% de las motos
+    # pasan sin generar cobro: es lo normal, no un fallo de conciliación. Se
+    # mide aparte porque de lo contrario absorbe la métrica de detección (en el
+    # carril 8 las motos sin cobro explican por sí solas todo el hueco AVC/SP).
+    clase_avc = pd.to_numeric(result.get("clase_avc_mapeada"), errors="coerce")
+    es_moto   = clase_avc == 15
+    moto_avc  = int((es_moto & result["tipo"].isin(["MATCH", "AVC"])).sum())
+    moto_sin  = int((es_moto & (result["tipo"] == "AVC")).sum())
+    moto_sat  = int(((result["tipo"] == "SAT") &
+                     (result["motivo_no_match"] == "moto_SAT_sin_AVC")).sum())
+    moto_rate = round(moto_sin / moto_avc * 100, 1) if moto_avc else 0.0
+
+    # Detección dejando las motos fuera de ambos lados del cociente: así vuelve
+    # a medir calidad de detección y no comportamiento de los motociclistas.
+    total_sm    = total - moto_avc - moto_sat
+    sat_only_sm = sat_only - moto_sat
+    detect_sm   = (round(max(total_sm - sat_only_sm, 0) / total_sm * 100, 1)
+                   if total_sm > 0 else 0.0)
+
     return {"total":total,"matched":matched,"avcOnly":avc_only,
             "satOnly":sat_only,"axleErr":axle_err,
-            "excluded":excluded,"matchRate":detect_rate}
+            "excluded":excluded,"matchRate":detect_rate,
+            "motoAvc":moto_avc,"motoSinCobro":moto_sin,"motoSat":moto_sat,
+            "motoRate":moto_rate,"matchRateSinMotos":detect_sm}
+
+
+# Ventana de conciliación por defecto. El desfase de un carril que se acerque
+# a este valor deja al SP correcto fuera de alcance (ver /api/lane-offsets).
+_RECON_WINDOW_S = 120
+
+# Versión del resumen guardado en recon_cache. Se sube al cambiar cómo se
+# concilia o qué métricas lleva el resumen: el caché anterior se recalcula solo.
+# 2 = ventana derivada del Δt + métricas de elusión de motos.
+_RECON_SCHEMA_VERSION = 2
+
+# Nitidez mínima para dar por bueno un pico de correlación (ver estimar_offset).
+_OFFSET_MIN_SHARPNESS = 2.5
+# Muestra mínima para guardar una medición. Con menos eventos el pico puede
+# salir por azar; la nitidez es la guarda principal, esto sólo evita el ruido
+# de madrugada. A las 08:00 el carril con menos tráfico ya reúne ~50 eventos.
+_OFFSET_MIN_EVENTS = 30
+# Margen sobre el Δt para derivar la ventana. Se ensancha cuando el valor se
+# hereda en vez de medirse: pasarse de ancho apenas cuesta (medido: 0 a 3
+# emparejamientos alterados de 271-989), quedarse corto rompe el carril entero.
+_OFFSET_MARGEN_MEDIDO = 30
+_OFFSET_MARGEN_HEREDADO = 40
+_OFFSET_RUNS_KEY = "lane_offset_runs"
+
+
+def _resolve_lane_offset(lane: str, fecha: str) -> Optional[Dict]:
+    """
+    Δt operativo de un carril para una fecha, con herencia del día anterior.
+
+    Cascada: se usa la medición del propio día si supera el umbral de nitidez;
+    si no, se hereda la última medición fiable anterior. Heredar sin corregir
+    la deriva introduce ~1s de error por día transcurrido, despreciable frente
+    al margen de la ventana.
+    """
+    with _db() as c:
+        hoy = c.execute("SELECT * FROM lane_offsets WHERE lane_name=? AND offset_date=?",
+                        (lane, fecha)).fetchone()
+        if hoy and (hoy["sharpness"] or 0) >= _OFFSET_MIN_SHARPNESS:
+            return {**dict(hoy), "resolved": "medido", "age_days": 0,
+                    "window_s": hoy["offset_s"] + _OFFSET_MARGEN_MEDIDO}
+        prev = c.execute(
+            "SELECT * FROM lane_offsets WHERE lane_name=? AND offset_date<? AND sharpness>=? "
+            "ORDER BY offset_date DESC LIMIT 1",
+            (lane, fecha, _OFFSET_MIN_SHARPNESS)).fetchone()
+
+    if prev:
+        edad = (date.fromisoformat(fecha) - date.fromisoformat(prev["offset_date"])).days
+        return {**dict(prev), "resolved": "heredado", "age_days": edad,
+                "window_s": prev["offset_s"] + _OFFSET_MARGEN_HEREDADO}
+    if hoy:
+        return {**dict(hoy), "resolved": "medido_dudoso", "age_days": 0,
+                "window_s": hoy["offset_s"] + _OFFSET_MARGEN_HEREDADO}
+    return None
+
+
+def _info_ventana(ventana: int, oper: Optional[Dict]) -> Dict:
+    """Claves que acompañan al resumen para que se vea qué ventana se usó y de dónde salió."""
+    return {
+        "schemaV": _RECON_SCHEMA_VERSION,
+        "windowS": ventana,
+        "windowFrom": (oper or {}).get("resolved") or "fijo",
+        "offsetS": (oper or {}).get("offset_s"),
+        "offsetDate": (oper or {}).get("offset_date"),
+    }
+
+
+def _cache_obsoleto(fecha: str) -> bool:
+    """
+    ¿Hay caché de este día calculado con una versión anterior del resumen?
+
+    El Dashboard lee el caché y la vista de carril recalcula en vivo, así que un
+    caché viejo hace que las dos pantallas muestren cifras distintas. Subir
+    _RECON_SCHEMA_VERSION fuerza el recálculo de lo que quedó desfasado.
+    """
+    with _db() as c:
+        rows = c.execute(
+            "SELECT summary_json FROM recon_cache WHERE cache_key LIKE ?",
+            (f"%::{fecha}",)).fetchall()
+    for r in rows:
+        try:
+            if json.loads(r["summary_json"]).get("schemaV") != _RECON_SCHEMA_VERSION:
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def _ventana_para_carril(lane: str, fecha: str) -> tuple:
+    """
+    Ventana de conciliación de un carril para una fecha, derivada de su Δt.
+
+    Devuelve (ventana, info). Si no hay Δt resoluble se cae al valor fijo
+    histórico, que es lo que había antes de medir nada.
+    """
+    oper = _resolve_lane_offset(lane, fecha)
+    if not oper:
+        return _RECON_WINDOW_S, None
+    return int(oper["window_s"]), oper
+
+
+def _invalidate_recon_cache(lane: str, fecha: str) -> None:
+    """Tira el caché de un carril/día. Se usa cuando cambia su Δt: la ventana
+    pasa a ser otra y el resultado guardado ya no corresponde."""
+    with _db() as c:
+        c.execute("DELETE FROM recon_cache WHERE cache_key LIKE ?", (f"%::{lane}::{fecha}",))
+
+
+def _estimate_offsets_for_date(fecha: str) -> int:
+    """Estima y guarda el Δt de todos los carriles de una fecha. Devuelve cuántos guardó."""
+    day_str = fecha.replace("-", "")
+    try:
+        sat_df = _load_sat_merged(day_str)
+    except Exception:
+        return 0
+    sc = _auto_cols_sat(sat_df)
+    if not all(sc.values()):
+        return 0
+
+    # margen de 1 día: hay eventos guardados con event_date desplazado (ver
+    # _events_from_local); el filtro por timestamp de después se queda con los del día.
+    avc_df = _events_from_local(None, datetime.strptime(fecha, "%Y-%m-%d").date(), margin_days=1)
+    if avc_df.empty:
+        return 0
+    ac = _auto_cols_avc(avc_df)
+    if not all(ac.values()) or ac["device"] not in avc_df.columns:
+        return 0
+
+    cfg = load_saved_settings()
+    try:
+        lane_mapping = json.loads(cfg.get("lane_mapping") or "{}")
+    except Exception:
+        lane_mapping = {}
+    sat_lanes = sorted(sat_df[sc["voie"]].dropna().astype(str).str.strip().unique().tolist())
+
+    guardados = 0
+    for lane_id in sorted(avc_df[ac["device"]].dropna().astype(str).unique()):
+        sat_lane = _resolve_sat_lane(lane_id, sat_lanes, lane_mapping)
+        if not sat_lane:
+            continue
+        try:
+            est = _lane_offset_estimate(avc_df, ac, lane_id, sat_df, sc, sat_lane, fecha)
+        except Exception:
+            continue
+        if est and est["n_avc"] >= _OFFSET_MIN_EVENTS:
+            antes = _ventana_para_carril(lane_id, fecha)[0]
+            _save_lane_offset(lane_id, fecha, est)
+            # Si la ventana resultante cambia, lo ya conciliado con la anterior
+            # deja de ser válido: se tira para que el loop lo rehaga.
+            if _ventana_para_carril(lane_id, fecha)[0] != antes:
+                _invalidate_recon_cache(lane_id, fecha)
+            guardados += 1
+    return guardados
+
+
+def _lane_offset_estimate(avc_df: pd.DataFrame, ac: Dict, lane_id: str,
+                          sat_df: pd.DataFrame, sc: Dict, sat_lane: str,
+                          fecha: str) -> Optional[Dict]:
+    """Extrae las dos series de tiempos del carril y estima su desfase."""
+    a = pd.to_datetime(
+        avc_df.loc[avc_df[ac["device"]].astype(str).str.strip() == lane_id.strip(), ac["date"]],
+        errors="coerce").dropna()
+    s = pd.to_datetime(
+        sat_df.loc[sat_df[sc["voie"]].astype(str).str.strip() == sat_lane.strip(), sc["date"]],
+        errors="coerce").dropna()
+    a = a[a.dt.strftime("%Y-%m-%d") == fecha]
+    s = s[s.dt.strftime("%Y-%m-%d") == fecha]
+    if a.empty or s.empty:
+        return None
+    return estimar_offset(
+        sorted((a.astype("int64") // 10 ** 9).tolist()),
+        sorted((s.astype("int64") // 10 ** 9).tolist()),
+    )
+
+
+def _save_lane_offset(lane: str, fecha: str, est: Dict, origin: str = "auto") -> None:
+    with _db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO lane_offsets"
+            "(lane_name,offset_date,offset_s,peak,coverage,sharpness,n_avc,n_sat,origin,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (lane, fecha, est["offset_s"], est["peak"], est["coverage"],
+             est["sharpness"], est["n_avc"], est["n_sat"], origin, _now()))
 
 
 def _reconcile_date_cache(day_str: str) -> None:
@@ -506,7 +770,8 @@ def _reconcile_date_cache(day_str: str) -> None:
             sources = c.execute("SELECT * FROM avc_sources WHERE enabled=1").fetchall()
 
         for src in sources:
-            avc_df = _events_from_local(src["id"], datetime.strptime(fecha, "%Y-%m-%d").date())
+            avc_df = _events_from_local(src["id"], datetime.strptime(fecha, "%Y-%m-%d").date(),
+                                        margin_days=1)
             if avc_df.empty:
                 continue
             ac = _auto_cols_avc(avc_df)
@@ -516,14 +781,20 @@ def _reconcile_date_cache(day_str: str) -> None:
                 sat_lane = _resolve_sat_lane(lane_id, sat_lanes, lane_mapping)
                 if not sat_lane:
                     continue
+                # La ventana ya no es fija: sale del Δt medido del carril, y el
+                # desempate del DP se centra en ese mismo Δt.
+                ventana, oper = _ventana_para_carril(lane_id, fecha)
                 result = reconcile(
-                    avc_df, sat_df, lane_id, sat_lane, fecha, 120,
+                    avc_df, sat_df, lane_id, sat_lane, fecha, ventana,
                     ac["date"], ac["device"], ac["type"], ac["axles"], ac["id"],
                     sc["date"], sc["voie"], sc["cls"], sc["tab"], sc["num"], sc["prix"],
+                    offset_s=int((oper or {}).get("offset_s") or 0),
                 )
                 if not result.empty:
-                    _save_cache(lane_id, fecha, result, _recon_summary(result), src["id"])
-                    _save_cache(lane_id, fecha, result, _recon_summary(result), 0)
+                    resumen = _recon_summary(result)
+                    resumen.update(_info_ventana(ventana, oper))
+                    _save_cache(lane_id, fecha, result, resumen, src["id"])
+                    _save_cache(lane_id, fecha, result, resumen, 0)
         _set_processing_status(fecha, "ready", "Conciliación actualizada")
     except Exception as exc:
         _set_processing_status(fecha, "error", str(exc))
@@ -873,6 +1144,7 @@ def _designed_report_html_bytes(form: Dict[str, Any], report: Dict[str, Any]) ->
         "error_conteo_avc":"Error conteo AVC","moto_detectada_solo_por_avc":"Moto solo AVC",
         "AVC_no_detecto":"SP sin AVC","moto_SAT_sin_AVC":"Moto SP sin AVC",
         "SAT_clase_indefinida":"SP clase indefinida",
+        "SP_compatible_fuera_de_ventana":"SP compatible fuera de ventana",
     }
     lanes = form.get("lanes") if isinstance(form.get("lanes"), list) else []
     rows = [r for r in report.get("rows", []) if not lanes or r.get("lane") in lanes]
@@ -1755,6 +2027,26 @@ def _lane_device_id(source_id: int, lane_name: str) -> str:
     raise HTTPException(404, f"No hay device_id sincronizado para el carril AVC '{lane_name}'")
 
 
+# Δt de respaldo para pedir la foto cuando el carril no tiene medición. Es el
+# valor que estaba fijo en el código; sólo se usa si no hay nada medido.
+_EVIDENCIA_OFFSET_FALLBACK = 60
+
+
+def _fecha_de_timestamp(value: str) -> str:
+    """Fecha ISO de un timestamp SP, para poder resolver el Δt de ese día."""
+    raw = str(value or "").strip()
+    try:
+        if re.fullmatch(r"\d{10,13}", raw):
+            seg = int(raw) / (1000.0 if len(raw) > 10 else 1.0)
+            return datetime.fromtimestamp(seg).date().isoformat()
+        parsed = parse_date(raw)
+        if pd.isna(parsed):
+            return ""
+        return parsed.date().isoformat()
+    except Exception:
+        return ""
+
+
 def _snapshot_unix_value(value: str, timezone_name: str, offset_seconds: int = 0) -> str:
     raw = str(value or "").strip()
     if re.fullmatch(r"\d{10,13}", raw):
@@ -1912,13 +2204,21 @@ def get_sat_evidence_photo(source_id: int, avc_lane: str, sat_timestamp: str,
                            user=Depends(_get_user)):
     config = _source_evidence_config(source_id)
     device_id = _lane_device_id(source_id, avc_lane)
-    # La foto física del vehículo ocurre ~60 s después del registro SP (el vehículo
-    # paga en caseta y luego cruza el detector). Se suma 60 s al timestamp SP para
-    # alinear la solicitud de snapshot con el momento del cruce.
+
+    # El vehículo cruza el detector Δt segundos después del registro SP, así que
+    # la foto hay que pedirla a la hora del SP MÁS ese Δt. El desfase es propio
+    # de cada carril y deriva ~1s/día, de modo que se toma el medido para ese
+    # carril y ese día. Antes era un 60 fijo, cuando los reales rondan 85-135s:
+    # pedir la foto 30-70s antes del cruce devolvía el vehículo equivocado.
+    fecha_sp = _fecha_de_timestamp(sat_timestamp)
+    oper = _resolve_lane_offset(avc_lane, fecha_sp) if fecha_sp else None
+    desfase = int(oper["offset_s"]) if oper else _EVIDENCIA_OFFSET_FALLBACK
+    origen_desfase = oper["resolved"] if oper else "fallback"
+
     timestamp = _snapshot_unix_value(
         sat_timestamp,
         str(config.get("timezone") or load_saved_settings().get("timezone") or "America/Mexico_City"),
-        offset_seconds=60,
+        offset_seconds=desfase,
     )
     snapshot = _request_alice_snapshot(config, device_id, timestamp)
     evidence = snapshot["evidence"]
@@ -1940,6 +2240,9 @@ def get_sat_evidence_photo(source_id: int, avc_lane: str, sat_timestamp: str,
         headers={
             "X-Alice-Camera": str(payload.get("camera_name") or ""),
             "X-Alice-Device-ID": device_id,
+            # Trazabilidad: con qué Δt se pidió la foto y de dónde salió.
+            "X-Delta-T": str(desfase),
+            "X-Delta-T-Origen": origen_desfase,
         },
     )
 
@@ -2375,9 +2678,15 @@ async def run_reconcile(request: Request, user=Depends(_get_user)):
     body      = await request.json()
     lane_avc  = body.get("avc_lane","")
     fecha     = body.get("date", date.today().isoformat())
-    ventana   = int(body.get("window_s", 120))
     source_id = int(body.get("source_id", 0))
     day_str   = fecha.replace("-","")
+
+    # La ventana sale del Δt medido del carril. Un window_s explícito en el
+    # cuerpo sigue mandando: lo usan el análisis profundo y las pruebas.
+    if body.get("window_s") is not None:
+        ventana, oper_win = int(body["window_s"]), None
+    else:
+        ventana, oper_win = _ventana_para_carril(lane_avc, fecha)
 
     # Resolve SAT lane: explicit > lane_mapping config > fallback to avc lane name
     lane_sat = body.get("sat_lane", "")
@@ -2392,7 +2701,7 @@ async def run_reconcile(request: Request, user=Depends(_get_user)):
     d = datetime.strptime(fecha, "%Y-%m-%d").date()
 
     # Cargar AVC desde almacenamiento local
-    avc_df = _events_from_local(source_id or None, d, lane_avc)
+    avc_df = _events_from_local(source_id or None, d, lane_avc, margin_days=1)
     if avc_df.empty:
         # Intentar sincronizar desde la fuente
         if source_id:
@@ -2440,6 +2749,7 @@ async def run_reconcile(request: Request, user=Depends(_get_user)):
             avc_df, sat_df, lane_avc, lane_sat, fecha, ventana,
             ac["date"], ac["device"], ac["type"], ac["axles"], ac["id"],
             sc["date"], sc["voie"], sc["cls"], sc["tab"], sc["num"], sc["prix"],
+            offset_s=int((oper_win or {}).get("offset_s") or 0),
         )
     except Exception as exc:
         return {"error": f"Error en conciliación: {exc}"}
@@ -2448,10 +2758,264 @@ async def run_reconcile(request: Request, user=Depends(_get_user)):
         return {"result":[], "summary":{}, "cols":{"avc":ac,"sat":sc}}
 
     summary = _recon_summary(result)
+    summary.update(_info_ventana(ventana, oper_win))
     _save_cache(lane_avc, fecha, result, summary, source_id)
 
     return {"result": result.fillna("").astype(str).to_dict(orient="records"),
             "summary": summary, "cols": {"avc":ac,"sat":sc}}
+
+@app.get("/api/lane-offsets")
+def get_lane_offsets(days: int = 30, user=Depends(_get_user)):
+    """
+    Serie histórica del desfase temporal SP->AVC por carril.
+
+    El desfase deriva con el reloj de los equipos. Si alcanza la ventana de
+    conciliación el SP correcto queda fuera de alcance y ese carril empieza a
+    emparejar con la transacción del vehículo anterior, así que `margin_s` y
+    `days_to_limit` son la alerta temprana de ese fallo.
+    """
+    desde = (date.today() - timedelta(days=max(days, 1))).isoformat()
+    with _db() as c:
+        rows = c.execute(
+            "SELECT * FROM lane_offsets WHERE offset_date>=? ORDER BY lane_name, offset_date",
+            (desde,)).fetchall()
+
+    por_carril: Dict[str, List[Dict]] = {}
+    for r in rows:
+        d = dict(r)
+        d["trusted"] = (d.get("sharpness") or 0) >= _OFFSET_MIN_SHARPNESS
+        por_carril.setdefault(d["lane_name"], []).append(d)
+
+    lanes = []
+    for lane, serie in sorted(por_carril.items()):
+        fiables = [p for p in serie if p["trusted"]]
+        actual = (fiables or serie)[-1] if serie else None
+
+        # Deriva por Theil-Sen (mediana de las pendientes entre todos los pares).
+        # Ni mínimos cuadrados ni diferencias diarias sirven: el primero se traga
+        # los saltos de reloj (un escalón de 30s dispara la pendiente) y las
+        # segundas solo pueden dar 0 o 1 s/día, que redondea mal los ritmos
+        # lentos. Theil-Sen aguanta saltos y da el ritmo fraccionario real.
+        deriva = None
+        if len(fiables) >= 3:
+            pts = [(date.fromisoformat(p["offset_date"]).toordinal(), p["offset_s"])
+                   for p in fiables]
+            slopes = sorted((y2 - y1) / (x2 - x1)
+                            for i, (x1, y1) in enumerate(pts)
+                            for (x2, y2) in pts[i + 1:] if x2 != x1)
+            if slopes:
+                n = len(slopes)
+                deriva = round(slopes[n // 2] if n % 2
+                               else (slopes[n // 2 - 1] + slopes[n // 2]) / 2, 2)
+
+        # Δt operativo de hoy: medido si lo hay, heredado del día anterior si no.
+        hoy = date.today().isoformat()
+        oper = _resolve_lane_offset(lane, hoy)
+
+        margen = (_RECON_WINDOW_S - actual["offset_s"]) if actual else None
+        dias = (int(margen / deriva)
+                if (margen is not None and margen > 0 and deriva and deriva > 0) else None)
+
+        if not actual:
+            estado = "sin_datos"
+        elif margen is not None and margen <= 0:
+            estado = "fuera_de_ventana"
+        elif dias is not None and dias <= 21:
+            estado = "cerca_del_limite"
+        elif deriva and abs(deriva) >= 0.3:
+            estado = "derivando"
+        else:
+            estado = "estable"
+
+        lanes.append({
+            "lane": lane,
+            "offset_s": actual["offset_s"] if actual else None,
+            "coverage": actual["coverage"] if actual else None,
+            "sharpness": actual["sharpness"] if actual else None,
+            "trusted": bool(actual and actual["trusted"]),
+            "measured_on": actual["offset_date"] if actual else None,
+            "drift_s_per_day": deriva,
+            "margin_s": margen,
+            "days_to_limit": dias,
+            "status": estado,
+            "operating": ({"offset_s": oper["offset_s"], "resolved": oper["resolved"],
+                           "age_days": oper["age_days"], "window_s": oper["window_s"],
+                           "measured_on": oper["offset_date"]} if oper else None),
+            "series": [{"date": p["offset_date"], "offset_s": p["offset_s"],
+                        "coverage": p["coverage"], "sharpness": p["sharpness"],
+                        "trusted": p["trusted"]} for p in serie],
+        })
+
+    return {"lanes": lanes, "window_s": _RECON_WINDOW_S,
+            "min_sharpness": _OFFSET_MIN_SHARPNESS}
+
+
+def _segmento_vehiculo(vt: str, nota: str, clase) -> str:
+    """Agrupa un MATCH para el análisis de Δt. Las motos van aparte porque su
+    elusión es masiva y su muestra conciliada es pequeña y ruidosa."""
+    vt = str(vt or "").lower()
+    try:
+        clase = int(clase or 0)
+    except Exception:
+        clase = 0
+    if clase == 15 or "moto" in vt:
+        return "Motos"
+    if "bus" in vt:
+        return "Buses"
+    if "truck" in vt or "camion" in vt:
+        return "Camiones ejes OK" if nota == "OK" else "Camiones ejes ERROR"
+    return "Autos ejes OK" if nota == "OK" else "Autos ejes ERROR"
+
+
+def _delta_por_segmento(result: pd.DataFrame) -> List[Dict]:
+    """Distribución del Δt de los MATCH, por segmento de vehículo."""
+    m = result[result["tipo"] == "MATCH"].copy()
+    if m.empty:
+        return []
+    # delta_segundos es negativo cuando el SP precede al AVC; se invierte para
+    # que el "adelanto" sea un número positivo, que es como se razona el Δt.
+    m["adelanto"] = -pd.to_numeric(m["delta_segundos"], errors="coerce")
+    m["seg"] = [
+        _segmento_vehiculo(r.get("Vehicle_type"), str(r.get("nota_ejes") or ""),
+                           r.get("clase_avc_mapeada"))
+        for _, r in m.iterrows()
+    ]
+    out = []
+    for seg, g in m.groupby("seg"):
+        d = g["adelanto"].dropna()
+        if d.empty:
+            continue
+        moda = d.round().mode()
+        out.append({
+            "segmento": seg, "n": int(len(d)),
+            "media": round(float(d.mean()), 1),
+            "mediana": round(float(d.median()), 1),
+            "moda": int(moda.iloc[0]) if len(moda) else None,
+            "p25": round(float(d.quantile(.25)), 1),
+            "p75": round(float(d.quantile(.75)), 1),
+            "desv": round(float(d.std()), 1) if len(d) > 1 else 0.0,
+        })
+    return sorted(out, key=lambda x: -x["n"])
+
+
+def _conteos(result: pd.DataFrame) -> Dict:
+    return {
+        "match":   int((result["tipo"] == "MATCH").sum()),
+        "avcOnly": int((result["tipo"] == "AVC").sum()),
+        "satOnly": int((result["tipo"] == "SAT").sum()),
+        "importe": round(float(pd.to_numeric(
+            result.loc[result["tipo"] == "MATCH", "sat_prix"], errors="coerce").fillna(0).sum()), 2),
+    }
+
+
+@app.get("/api/lane-offset-analysis")
+def get_lane_offset_analysis(lane: str, query_date: str, compare: int = 1,
+                             user=Depends(_get_user)):
+    """
+    Análisis profundo del Δt de un carril en un día concreto.
+
+    Devuelve la curva de correlación (por qué el Δt es ese y no otro), la
+    distribución del Δt por segmento de vehículo, y qué cambiaría al usar la
+    ventana recomendada en vez de la actual. La curva cuesta ~150ms; la
+    comparativa exige una pasada extra de reconcile (~1.5s), por eso va
+    detrás del parámetro `compare`.
+    """
+    day_str = query_date.replace("-", "")
+    try:
+        d = datetime.strptime(query_date, "%Y-%m-%d").date()
+    except Exception:
+        return {"error": "Fecha inválida"}
+
+    avc_df = _events_from_local(None, d, lane, margin_days=1)
+    if avc_df.empty:
+        return {"error": f"Sin datos AVC para {lane} en {query_date}"}
+    try:
+        sat_df = _load_sat_merged(day_str)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    ac, sc = _auto_cols_avc(avc_df), _auto_cols_sat(sat_df)
+    if not all(ac.values()) or not all(sc.values()):
+        return {"error": "No se detectaron las columnas necesarias"}
+
+    cfg = load_saved_settings()
+    try:
+        lane_mapping = json.loads(cfg.get("lane_mapping") or "{}")
+    except Exception:
+        lane_mapping = {}
+    sat_lanes = sorted(sat_df[sc["voie"]].dropna().astype(str).str.strip().unique().tolist())
+    sat_lane = _resolve_sat_lane(lane, sat_lanes, lane_mapping)
+    if not sat_lane:
+        return {"error": f"El carril {lane} no tiene equivalencia SP configurada"}
+
+    a = pd.to_datetime(avc_df[ac["date"]], errors="coerce").dropna()
+    s = pd.to_datetime(
+        sat_df.loc[sat_df[sc["voie"]].astype(str).str.strip() == sat_lane, sc["date"]],
+        errors="coerce").dropna()
+    a = a[a.dt.strftime("%Y-%m-%d") == query_date]
+    s = s[s.dt.strftime("%Y-%m-%d") == query_date]
+    est = estimar_offset(
+        sorted((a.astype("int64") // 10 ** 9).tolist()),
+        sorted((s.astype("int64") // 10 ** 9).tolist()),
+        with_curve=True)
+    if not est:
+        return {"error": "Muestra insuficiente para estimar el Δt de este carril y día"}
+
+    offset = est["offset_s"]
+    fiable = (est["sharpness"] or 0) >= _OFFSET_MIN_SHARPNESS
+    # Misma fuente que usa la conciliación, para que el panel no muestre una
+    # ventana distinta de la que realmente se aplica.
+    recomendada, _oper_win = _ventana_para_carril(lane, query_date)
+    margen = _RECON_WINDOW_S - offset
+
+    def _corre(v):
+        return reconcile(avc_df, sat_df, lane, sat_lane, query_date, v,
+                         ac["date"], ac["device"], ac["type"], ac["axles"], ac["id"],
+                         sc["date"], sc["voie"], sc["cls"], sc["tab"], sc["num"], sc["prix"])
+
+    actual = _corre(_RECON_WINDOW_S)
+    bloque_actual = {"window_s": _RECON_WINDOW_S, **_conteos(actual),
+                     "segmentos": _delta_por_segmento(actual)}
+
+    bloque_reco, cambio = None, None
+    if compare and recomendada > _RECON_WINDOW_S:
+        prop = _corre(recomendada)
+        bloque_reco = {"window_s": recomendada, **_conteos(prop),
+                       "segmentos": _delta_por_segmento(prop)}
+        pa = actual[actual["tipo"] == "MATCH"].set_index(
+            actual[actual["tipo"] == "MATCH"]["avc_id"].astype(str))["sat_numero"].astype(str)
+        pb = prop[prop["tipo"] == "MATCH"].set_index(
+            prop[prop["tipo"] == "MATCH"]["avc_id"].astype(str))["sat_numero"].astype(str)
+        ka, kb = set(pa.index), set(pb.index)
+        cambio = {
+            "nuevos": len(kb - ka),
+            "perdidos": len(ka - kb),
+            "repareados": sum(1 for k in (ka & kb) if pa.get(k) != pb.get(k)),
+            "importe_extra": round(bloque_reco["importe"] - bloque_actual["importe"], 2),
+        }
+
+    if not fiable:
+        veredicto = "sin_senal"
+    elif margen < 0:
+        veredicto = "ventana_insuficiente"
+    elif margen <= 20:
+        veredicto = "al_limite"
+    else:
+        veredicto = "correcto"
+
+    return {
+        "lane": lane, "sat_lane": sat_lane, "date": query_date,
+        "offset_s": offset, "peak": est["peak"], "background": est["background"],
+        "coverage": est["coverage"], "sharpness": est["sharpness"],
+        "n_avc": est["n_avc"], "n_sat": est["n_sat"],
+        "trusted": fiable, "min_sharpness": _OFFSET_MIN_SHARPNESS,
+        "window_s": _RECON_WINDOW_S, "margin_s": margen,
+        "recommended_window_s": recomendada,
+        "verdict": veredicto,
+        "curve": est["curve"],
+        "actual": bloque_actual, "recommended": bloque_reco, "delta": cambio,
+    }
+
 
 @app.get("/api/class-summary")
 def get_class_summary(query_date: str = "", user=Depends(_get_user)):
@@ -3624,6 +4188,7 @@ async def update_user(uid: int, request: Request, user=Depends(_require_admin)):
 _REPORT_SCHED_LOCK_FH = None
 _AVC_SYNC_LOCK_FH = None
 _RECONCILE_AUTO_LOCK_FH = None
+_OFFSET_SCHED_LOCK_FH = None
 
 def _weekday_key(dt: datetime) -> str:
     return ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"][dt.weekday()]
@@ -3772,13 +4337,121 @@ def _auto_reconcile_scheduler_loop() -> None:
                 if fecha in cache_by_date:
                     # Verificar si el SAT fue actualizado después del último cache
                     sat_mtime = datetime.fromtimestamp(os.path.getmtime(mp)).isoformat()
-                    if sat_mtime <= cache_by_date[fecha]:
+                    # Un caché de versión anterior se rehace aunque el SP no haya
+                    # cambiado: si no, el Dashboard (que lee caché) y la vista de
+                    # carril (que recalcula) mostrarían cifras distintas.
+                    if sat_mtime <= cache_by_date[fecha] and not _cache_obsoleto(fecha):
                         continue  # cache vigente, nada que hacer
 
                 _start_reconcile_date_cache(day_str)
         except Exception:
             pass
         time.sleep(max(60, RECONCILE_AUTO_INTERVAL_SECONDS))
+
+
+def _lane_offset_scheduler_loop() -> None:
+    """
+    Estima el Δt de cada carril dos veces al día (OFFSET_RUN_HOURS).
+
+    Cada turno se marca como hecho para no repetirlo, y si un turno falla por
+    falta de datos se reintenta en el siguiente despertar: así una caída de la
+    fuente a media mañana no deja el día sin medición.
+    """
+    time.sleep(45)  # dejar que el servidor termine de iniciar
+    while True:
+        try:
+            tz = get_event_tz(load_saved_settings())
+            ahora = datetime.now(tz)
+            fecha = ahora.date().isoformat()
+
+            hechas = _get_app_setting_json(_OFFSET_RUNS_KEY, {})
+            previos = set(hechas.get(fecha) or [])
+            ya = set(previos)
+            for h in OFFSET_RUN_HOURS:
+                slot = "%02dh" % h
+                if ahora.hour >= h and slot not in ya:
+                    if _estimate_offsets_for_date(fecha):
+                        ya.add(slot)
+                        try:
+                            _check_offset_alerts(fecha)
+                        except Exception:
+                            pass
+
+            if ya != previos:
+                hechas[fecha] = sorted(ya)
+                for viejo in sorted(hechas.keys())[:-10]:   # conservar 10 días
+                    hechas.pop(viejo, None)
+                _set_app_setting_json(_OFFSET_RUNS_KEY, hechas)
+        except Exception:
+            pass
+        time.sleep(max(60, OFFSET_CHECK_INTERVAL_SECONDS))
+
+
+def _check_offset_alerts(fecha: str) -> None:
+    """
+    Avisa cuando un carril se acerca al límite de su ventana o pega un salto.
+
+    Sin esto el fallo es silencioso: el Carril-8 estuvo conciliando mal desde el
+    10 de julio sin que nada lo señalara. Se registra un aviso por carril y día
+    como mucho, para no inundar el historial.
+    """
+    ya = _get_app_setting_json("lane_offset_alerts_sent", {})
+    enviados = set(ya.get(fecha) or [])
+    cambio = False
+
+    with _db() as c:
+        rows = c.execute(
+            "SELECT lane_name, offset_date, offset_s, sharpness FROM lane_offsets "
+            "WHERE offset_date<=? AND sharpness>=? ORDER BY lane_name, offset_date",
+            (fecha, _OFFSET_MIN_SHARPNESS)).fetchall()
+
+    por_carril: Dict[str, List] = {}
+    for r in rows:
+        por_carril.setdefault(r["lane_name"], []).append(r)
+
+    for lane, serie in por_carril.items():
+        if serie[-1]["offset_date"] != fecha:
+            continue
+        actual = serie[-1]["offset_s"]
+
+        # Salto brusco respecto al día anterior: ajuste de reloj.
+        if len(serie) >= 2:
+            salto = actual - serie[-2]["offset_s"]
+            if abs(salto) >= 10 and f"{lane}:salto" not in enviados:
+                _record_notification(
+                    "Alarm", lane, f"Δt de {lane} saltó {salto:+d}s en un día "
+                    f"({serie[-2]['offset_s']}s → {actual}s) — posible ajuste de reloj",
+                    [], "Recorded")
+                enviados.add(f"{lane}:salto"); cambio = True
+
+    # Medición estancada: si un carril lleva días sin Δt propio, la ventana se
+    # está heredando y la deriva la va dejando obsoleta. Es el aviso de que la
+    # cadena de datos se rompió, no de que el Δt sea malo.
+    for lane in sorted(por_carril):
+        oper = _resolve_lane_offset(lane, fecha)
+        if oper and oper["resolved"] != "medido" and oper["age_days"] >= 2 \
+                and f"{lane}:estancado" not in enviados:
+            _record_notification(
+                "Alarm", lane, f"{lane} lleva {oper['age_days']} días sin Δt medido: "
+                f"se concilia con el del {oper['offset_date']} — revisar la entrada de datos",
+                [], "Recorded")
+            enviados.add(f"{lane}:estancado"); cambio = True
+
+    if cambio:
+        ya[fecha] = sorted(enviados)
+        for viejo in sorted(ya.keys())[:-10]:
+            ya.pop(viejo, None)
+        _set_app_setting_json("lane_offset_alerts_sent", ya)
+
+
+def _start_lane_offset_scheduler_once() -> None:
+    global _OFFSET_SCHED_LOCK_FH
+    try:
+        _OFFSET_SCHED_LOCK_FH = open("/tmp/auditec_lane_offset_scheduler.lock", "w")
+        fcntl.flock(_OFFSET_SCHED_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        return
+    threading.Thread(target=_lane_offset_scheduler_loop, daemon=True).start()
 
 
 def _start_auto_reconcile_scheduler_once() -> None:
@@ -3802,6 +4475,7 @@ def startup():
     _start_report_scheduler_once()
     _start_avc_sync_scheduler_once()
     _start_auto_reconcile_scheduler_once()
+    _start_lane_offset_scheduler_once()
 
 frontend_dir = os.path.join(BASE_DIR, "frontend")
 

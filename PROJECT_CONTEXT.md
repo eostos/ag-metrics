@@ -37,6 +37,25 @@ This reconciliation process produces an audit trail per lane, per date, with det
 
 ---
 
+## Unattended Pipelines
+
+Four background threads in `api.py`, started at FastAPI startup, plus one
+external daemon. None of them requires a browser to be open.
+
+| Pipeline | Thread / process | Cadence | What it does |
+|---|---|---|---|
+| SP merge | `sat_watcher.py` (systemd user service, linger on) | 60 s | Merges SFTP batches into `~/sat_merged/*-MERGED.json` |
+| AVC sync | `_avc_sync_scheduler_loop` | 300 s | Fetches AVC events; on changes, invalidates affected dates' cache **and relaunches their reconciliation** |
+| Reconciliation | `_auto_reconcile_scheduler_loop` | 300 s | Reconciles the last `RECONCILE_AUTO_DAYS_BACK` days when SP is newer than cache or the cache schema is stale |
+| Δt measurement | `_lane_offset_scheduler_loop` | 600 s wake, acts at 09h and 23h | Measures each lane's offset, stores it, raises alerts |
+| Reports | `_report_scheduler_loop` | — | Scheduled report emails |
+
+Reconciliation results are cached in `recon_cache` under both the real
+`source_id` and `0`. The Dashboard reads that cache; lane detail views
+recompute live. See `docs/toll-audit-logic.md` for why that distinction matters.
+
+---
+
 ## Main Workflows
 
 ### 1. AVC Data Ingestion
@@ -193,6 +212,8 @@ Alarms Phase 1 is basic configuration/history only:
 ## How AI Agents Should Reason About This Project
 
 - The **central data flow** is: AVC events ↔ SAT transactions, joined by time window + class compatibility.
+- **Δt (the SP→AVC time offset) is a first-class concept.** Each lane has its own offset — the seconds by which the SP transaction precedes the AVC detection (170 / 148 / 96 s for lanes 7 / 8 / 9 as of 2026-08-07; query `GET /api/lane-offsets` for live values). It **drifts ~1 s per day** because the SP and AVC clocks are not synchronised, and occasionally jumps outright (Carril-8 +33 s on 2026-07-01, Carril-7 +60 s on 2026-08-01 — both on the 1st of the month). Nothing about Δt is configured by hand: it is measured twice daily by cross-correlation, stored per lane and day in `lane_offsets`, and inherited from the previous day when a day's own measurement fails the sharpness gate. Everything time-related derives from it — the reconciliation window (`Δt + 30`), the DP tie-break centre, and the timestamp used to request evidence photos. **Read `docs/delta-t-guide.md` before touching anything time-related.** A lane whose Δt exceeds its window mis-pairs nearly every event: that is what happened to Carril-8 from 2026-07-10 (1067 of 1112 matches wrong in a single day) and what the derived window now prevents automatically.
+- **Motorcycle evasion is normal, not a defect.** ~95 % of motorcycles in lanes 7 and 8 pass without generating an SP charge. `moto_detectada_solo_por_avc` rows are the *correct* output, and moto volume alone accounts for the entire AVC/SP gap in Carril-8. Detection metrics report motorcycles separately (`motoAvc`, `motoSinCobro`, `motoRate`, `matchRateSinMotos`) so the ratio measures detection quality rather than rider behaviour.
 - The **reconciliation result** has four row types: `MATCH`, `AVC` (no SAT match), `SAT` (no AVC match), `SP_EXCLUDED` (SAT event excluded from reconciliation — `id_obs_mp==30 AND id_classe==0 AND id_paiement==0`).
 - The `tipo` field on each result row is the primary audit status field.
 - **Class mapping** is AVC-to-SAT: AVC uses `vehicle_type` strings + `axle_count` → mapped to a numeric SAT class (1–15, or 0 for invalid/unknown); SAT uses `id_classe` and `tab_id_classe`.
@@ -215,5 +236,8 @@ Alarms Phase 1 is basic configuration/history only:
 - Do **not** assume LPR/OCR capabilities — image URLs are stored but no OCR logic exists.
 - Do **not** assume the Reports screen exports are fully implemented — export buttons (CSV/Excel) exist in the UI but their backend implementation was not confirmed in the repository.
 - Do **not** assume the SAT plaza is always "Texcoco" — the plaza name is configurable; the filename pattern suggests the current deployment targets Texcoco.
-- Do **not** assume `sat_watcher.py` is always running — it is a separate process that must be started independently of the main FastAPI server.
+- Do **not** assume `sat_watcher.py` is always running — it is a separate process that must be started independently of the main FastAPI server. It is now installed as a systemd **user** service (`~/.config/systemd/user/sat-watcher.service`, linger enabled); verify with `systemctl --user is-active sat-watcher`. Without it, SP merges only happen when someone opens the Dashboard, which triggers `POST /api/merge-sat`.
+- Do **not** assume the reconciliation window is 120 seconds. That constant (`_RECON_WINDOW_S`) is now only a fallback — the real window is derived per lane from Δt. See `docs/delta-t-guide.md`.
+- Do **not** trust a cached reconciliation summary after changing reconciliation logic. The Dashboard reads `recon_cache` while lane views recompute live, so the two diverge silently. Bump `_RECON_SCHEMA_VERSION` and stale caches rebuild themselves.
+- Do **not** assume `avc_local_events.event_date` equals the date of `event_timestamp` for historical rows. Sync used to stamp the *requested* date; 68 rows were affected and have been normalised, and `_fetch_and_store` now derives the date from the event's own timestamp.
 - Do **not** assume there is a `.env` file present — it is optional; engine.py calls `load_dotenv()` but falls back gracefully to empty strings.

@@ -34,6 +34,7 @@ function motiveLabel(motivo) {
     AVC_no_detecto: "SP sin AVC",
     moto_SAT_sin_AVC: "Moto SP sin AVC",
     SAT_clase_indefinida: "SP clase indefinida",
+    SP_compatible_fuera_de_ventana: "SP compatible fuera de ventana",
     ERROR_DETECCION_EJES_AVC: "Error detección ejes",
   };
   return labels[motivo] || motivo || "Sin motivo";

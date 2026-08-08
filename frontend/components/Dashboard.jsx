@@ -39,12 +39,269 @@ function MatchRing({ pct, size=52 }) {
   );
 }
 
-function LaneCard({ lane, stats, onClick }) {
+// Δt — desfase temporal SP→AVC del carril. Deriva con el reloj de los equipos:
+// si alcanza la ventana de conciliación, el SP correcto queda fuera de alcance
+// y el carril empieza a emparejar con la transacción del vehículo anterior.
+function DeltaT({ off }) {
+  if (!off || off.offset_s == null) return null;
+  const color = off.status==="fuera_de_ventana" ? "#ff4c6a"
+              : off.status==="cerca_del_limite" ? "#ff7e3f"
+              : off.status==="derivando"        ? "#f5d433"
+              : "#22c97b";
+  const label = {fuera_de_ventana:"fuera de ventana", cerca_del_limite:"cerca del límite",
+                 derivando:"derivando", estable:"estable", sin_datos:"sin datos"}[off.status]
+                || off.status;
+  const drift = off.drift_s_per_day;
+  const tip = `Desfase SP→AVC medido el ${off.measured_on}.`
+    + ` Nitidez ${off.sharpness ?? "—"}, cobertura ${off.coverage ?? "—"}%.`
+    + (off.days_to_limit != null
+        ? ` Alcanza la ventana de ${off.window_s}s en ~${off.days_to_limit} días.` : "");
+  return (
+    <div style={{borderTop:"1px solid #1c2b46",marginTop:10,paddingTop:9}} title={tip}>
+      <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between"}}>
+        <span style={{fontSize:9,color:"#5b6a8a",textTransform:"uppercase",letterSpacing:"0.7px"}}>
+          Δt SP→AVC
+        </span>
+        <span style={{fontSize:15,fontWeight:800,color,lineHeight:1}}>
+          {off.offset_s}s
+          {drift!=null && (
+            <span style={{fontSize:10,fontWeight:600,color:"#5b6a8a",marginLeft:5}}>
+              {drift>0?"▲":drift<0?"▼":""}{Math.abs(drift).toFixed(1)}s/día
+            </span>
+          )}
+        </span>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:5,marginTop:4}}>
+        <span style={{width:5,height:5,borderRadius:5,background:color,flexShrink:0}}/>
+        <span style={{fontSize:10,color:"#5b6a8a"}}>{label}</span>
+        {off.margin_s!=null && (
+          <span style={{fontSize:10,color:"#5b6a8a",marginLeft:"auto"}}>margen {off.margin_s}s</span>
+        )}
+      </div>
+      {off.trusted===false && (
+        <div style={{fontSize:9,color:"#8a6a3f",marginTop:3}}>medición poco fiable</div>
+      )}
+      {/* Valor operativo: medido hoy, o heredado del último día fiable */}
+      {off.operating && (
+        <div style={{fontSize:9,color:"#5b6a8a",marginTop:4,display:"flex",justifyContent:"space-between"}}
+          title={off.operating.resolved==="medido"
+            ? `Δt medido hoy (${off.operating.measured_on}). Ventana derivada: ${off.operating.window_s}s.`
+            : `Sin medición fiable hoy: se hereda el Δt del ${off.operating.measured_on}`
+              + ` (${off.operating.age_days} día(s)). La ventana se ensancha a ${off.operating.window_s}s`
+              + ` para compensar la incertidumbre.`}>
+          <span>
+            {off.operating.resolved==="medido"   ? "medido hoy"
+             : off.operating.resolved==="heredado" ? `heredado · ${off.operating.age_days}d`
+             : "medición dudosa"}
+          </span>
+          <span>ventana {off.operating.window_s}s</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Curva de correlación: coincidencias SP↔AVC según cuánto se desplaza el SP.
+// Es la prueba visual de por qué el Δt es ese y no otro — un pico estrecho muy
+// por encima del fondo de azar.
+function OffsetCurve({ curve, offset, windowS, W=620, H=170 }) {
+  if (!curve || !curve.length) return null;
+  const pad = {l:38, r:12, t:12, b:22};
+  const iw = W-pad.l-pad.r, ih = H-pad.t-pad.b;
+  const maxH = Math.max(...curve.map(p=>p.hits)) || 1;
+  const maxL = Math.max(...curve.map(p=>p.lag)) || 1;
+  const X = l => pad.l + (l/maxL)*iw;
+  const Y = h => pad.t + ih - (h/maxH)*ih;
+  const pts = curve.map(p=>`${X(p.lag).toFixed(1)},${Y(p.hits).toFixed(1)}`).join(" ");
+  const fuera = windowS < offset;
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:"block"}}>
+      <rect x={pad.l} y={pad.t} width={iw} height={ih} fill="#0a1220" stroke="#1c2b46"/>
+      {/* zona alcanzable por la ventana actual */}
+      <rect x={X(0)} y={pad.t} width={Math.max(X(windowS)-X(0),0)} height={ih}
+        fill="rgba(34,201,123,0.06)"/>
+      <polyline points={pts} fill="none" stroke="#4d7fe0" strokeWidth="1.4"/>
+      {/* límite de ventana */}
+      <line x1={X(windowS)} y1={pad.t} x2={X(windowS)} y2={pad.t+ih}
+        stroke="#f5d433" strokeWidth="1.2" strokeDasharray="4 3"/>
+      <text x={X(windowS)+4} y={pad.t+11} fill="#f5d433" fontSize="9">ventana {windowS}s</text>
+      {/* pico */}
+      <line x1={X(offset)} y1={pad.t} x2={X(offset)} y2={pad.t+ih}
+        stroke={fuera?"#ff4c6a":"#22c97b"} strokeWidth="1.2"/>
+      <text x={X(offset)+4} y={pad.t+ih-6} fill={fuera?"#ff4c6a":"#22c97b"} fontSize="10" fontWeight="700">
+        Δt {offset}s
+      </text>
+      <text x={4} y={pad.t+8} fill="#5b6a8a" fontSize="9">{maxH}</text>
+      <text x={4} y={pad.t+ih} fill="#5b6a8a" fontSize="9">0</text>
+      <text x={pad.l} y={H-6} fill="#5b6a8a" fontSize="9">0s</text>
+      <text x={W-pad.r-26} y={H-6} fill="#5b6a8a" fontSize="9">{maxL}s</text>
+      <text x={pad.l+iw/2-58} y={H-6} fill="#5b6a8a" fontSize="9">desplazamiento aplicado al SP</text>
+    </svg>
+  );
+}
+
+// Panel de análisis profundo del Δt de un carril en un día.
+function DeepDeltaPanel({ lane, date, onClose }) {
+  const [d, setD]     = React.useState(null);
+  const [err, setErr] = React.useState("");
+  React.useEffect(()=>{
+    setD(null); setErr("");
+    window.API.get(`/api/lane-offset-analysis?lane=${encodeURIComponent(lane)}&query_date=${date}`)
+      .then(r=>{ if(r&&r.error) setErr(r.error); else setD(r); })
+      .catch(e=>setErr(String(e&&e.message||e)));
+  },[lane,date]);
+
+  const VERD = {
+    ventana_insuficiente:{c:"#ff4c6a",t:"Ventana insuficiente"},
+    al_limite:           {c:"#ff7e3f",t:"Al límite"},
+    correcto:            {c:"#22c97b",t:"Correcto"},
+    sin_senal:           {c:"#8a9ab5",t:"Sin señal fiable"},
+  };
+  const v = d ? (VERD[d.verdict]||{c:"#8a9ab5",t:d.verdict}) : null;
+
+  return (
+    <div onClick={onClose}
+      style={{position:"fixed",inset:0,background:"rgba(4,8,16,0.78)",zIndex:80,
+              display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:"#0d1525",border:"1px solid #2a3045",borderRadius:14,
+                padding:"20px 24px",maxWidth:760,width:"100%",maxHeight:"88vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+          <div>
+            <div style={{fontSize:15,fontWeight:800,color:"#e8edf5"}}>Análisis profundo de Δt</div>
+            <div style={{fontSize:11,color:"#5b6a8a",marginTop:2}}>{lane} · {date}</div>
+          </div>
+          <button onClick={onClose} style={{...dashStyles.secondaryBtn,padding:"4px 10px"}}>Cerrar</button>
+        </div>
+
+        {!d && !err && <div style={{color:"#8a9ab5",fontSize:12,padding:"28px 0",textAlign:"center"}}>
+          Calculando… (dos pasadas de conciliación, ~4s)
+        </div>}
+        {err && <div style={{color:"#ff4c6a",fontSize:12,padding:"20px 0"}}>{err}</div>}
+
+        {d && (<React.Fragment>
+          <div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 0 14px"}}>
+            <span style={{...dashStyles.badge,background:`${v.c}22`,color:v.c,fontSize:11}}>{v.t}</span>
+            <span style={{fontSize:22,fontWeight:800,color:"#e8edf5",lineHeight:1}}>Δt {d.offset_s}s</span>
+            <span style={{fontSize:11,color:"#5b6a8a"}}>
+              ventana {d.window_s}s · margen {d.margin_s}s · recomendada {d.recommended_window_s}s
+            </span>
+          </div>
+
+          {/* Por qué el Δt es ese */}
+          <div style={{fontSize:11,color:"#8a9ab5",lineHeight:1.65,marginBottom:12}}>
+            El SP registra el cobro <b style={{color:"#e8edf5"}}>{d.offset_s} segundos antes</b> de que
+            el AVC detecte el vehículo. Ese desfase se mide sin necesidad de emparejar nada: se desliza
+            la serie del SP sobre la del AVC y se cuenta cuántos coinciden en cada desplazamiento.
+            A {d.offset_s}s coinciden <b style={{color:"#e8edf5"}}>{d.peak}</b> eventos, frente
+            a {d.background} que es lo máximo que logra cualquier otro desplazamiento por puro azar
+            — un pico <b style={{color:"#e8edf5"}}>{d.sharpness}× </b>sobre el fondo, sobre
+            {" "}{d.n_avc} eventos AVC y {d.n_sat} transacciones SP.
+          </div>
+
+          <OffsetCurve curve={d.curve} offset={d.offset_s} windowS={d.window_s}/>
+
+          {d.verdict==="ventana_insuficiente" && (
+            <div style={{background:"rgba(255,76,106,0.08)",border:"1px solid rgba(255,76,106,0.25)",
+                         borderRadius:8,padding:"10px 12px",margin:"12px 0",fontSize:11,
+                         color:"#e8b5c0",lineHeight:1.65}}>
+              El pico cae <b>fuera</b> de la ventana de {d.window_s}s (zona verde). El SP correcto es
+              inalcanzable, así que el algoritmo empareja cada AVC con el cobro del vehículo anterior,
+              que sí entra en ventana. Por eso los matches existen pero son falsos.
+            </div>
+          )}
+
+          {/* Comparativa */}
+          {d.recommended && (
+            <div style={{marginTop:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#e8edf5",marginBottom:7}}>
+                Qué cambia con la ventana recomendada
+              </div>
+              <table style={{width:"100%",fontSize:11,borderCollapse:"collapse",color:"#8a9ab5"}}>
+                <thead><tr style={{color:"#5b6a8a"}}>
+                  <th style={{textAlign:"left",padding:"4px 0"}}></th>
+                  <th style={{textAlign:"right"}}>Actual {d.actual.window_s}s</th>
+                  <th style={{textAlign:"right"}}>Recomendada {d.recommended.window_s}s</th>
+                </tr></thead>
+                <tbody>
+                  {[["MATCH","match"],["AVC sin SP","avcOnly"],["SP sin AVC","satOnly"],
+                    ["Importe SP conciliado","importe"]].map(([lab,k])=>(
+                    <tr key={k} style={{borderTop:"1px solid #1c2b46"}}>
+                      <td style={{padding:"5px 0"}}>{lab}</td>
+                      <td style={{textAlign:"right"}}>{(d.actual[k]||0).toLocaleString()}</td>
+                      <td style={{textAlign:"right",color:"#22c97b",fontWeight:700}}>
+                        {(d.recommended[k]||0).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {d.delta && (
+                <div style={{fontSize:11,color:"#8a9ab5",lineHeight:1.65,marginTop:10}}>
+                  Se recuperan <b style={{color:"#e8edf5"}}>{d.delta.nuevos}</b> matches nuevos y
+                  se pierden {d.delta.perdidos}. Pero lo importante es que
+                  {" "}<b style={{color:"#ff7e3f"}}>{d.delta.repareados}</b> de
+                  los {d.actual.match} matches actuales <b>cambian de pareja SP</b>: hoy están
+                  emparejados con la transacción equivocada.
+                  {d.delta.importe_extra>0 && <span> Quedan por conciliar
+                    {" "}<b style={{color:"#e8edf5"}}>{d.delta.importe_extra.toLocaleString()}</b> de importe SP.</span>}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Segmentos */}
+          {(d.recommended||d.actual).segmentos.length>0 && (
+            <div style={{marginTop:16}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#e8edf5",marginBottom:7}}>
+                Δt por tipo de vehículo
+                <span style={{fontWeight:400,color:"#5b6a8a"}}> · con ventana {(d.recommended||d.actual).window_s}s</span>
+              </div>
+              <table style={{width:"100%",fontSize:11,borderCollapse:"collapse",color:"#8a9ab5"}}>
+                <thead><tr style={{color:"#5b6a8a"}}>
+                  <th style={{textAlign:"left",padding:"4px 0"}}>Segmento</th>
+                  <th style={{textAlign:"right"}}>n</th><th style={{textAlign:"right"}}>Moda</th>
+                  <th style={{textAlign:"right"}}>Mediana</th><th style={{textAlign:"right"}}>p25–p75</th>
+                  <th style={{textAlign:"right"}}>Desv</th>
+                </tr></thead>
+                <tbody>
+                  {(d.recommended||d.actual).segmentos.map(s=>(
+                    <tr key={s.segmento} style={{borderTop:"1px solid #1c2b46"}}>
+                      <td style={{padding:"5px 0"}}>{s.segmento}</td>
+                      <td style={{textAlign:"right"}}>{s.n}</td>
+                      <td style={{textAlign:"right",color:"#e8edf5",fontWeight:700}}>{s.moda}s</td>
+                      <td style={{textAlign:"right"}}>{s.mediana}s</td>
+                      <td style={{textAlign:"right"}}>{s.p25}–{s.p75}</td>
+                      <td style={{textAlign:"right"}}>{s.desv}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{fontSize:10,color:"#5b6a8a",marginTop:7,lineHeight:1.6}}>
+                Que los distintos tipos de vehículo coincidan en la misma moda confirma que el desfase
+                es del carril y no del vehículo. Las motos van aparte: su elusión es masiva, así que
+                la muestra conciliada es pequeña y poco representativa.
+              </div>
+            </div>
+          )}
+        </React.Fragment>)}
+      </div>
+    </div>
+  );
+}
+
+function LaneCard({ lane, stats, offset, onDeepDelta, onClick }) {
   const [hov, setHov] = React.useState(false);
   const s = stats || {};
-  const matchRate = s.matchRate || 0;
-  const avcTotal  = (s.matched||0) + (s.avcOnly||0);
-  const spTotal   = (s.matched||0) + (s.satOnly||0);
+  // La elusión de motos es habitual (~95% en los carriles 7 y 8) y absorbe las
+  // métricas de detección, así que se descuenta de ambos lados del cociente y
+  // se reporta como métrica propia.
+  const motoAvc     = s.motoAvc || 0;
+  const motoSin     = s.motoSinCobro || 0;
+  const motoMatched = Math.max(motoAvc - motoSin, 0);
+  const hayMotos    = motoAvc > 0;
+  const matchRate = (hayMotos && s.matchRateSinMotos!=null) ? s.matchRateSinMotos : (s.matchRate||0);
+  const avcTotal  = (s.matched||0) + (s.avcOnly||0) - motoAvc;
+  const spTotal   = (s.matched||0) + (s.satOnly||0) - motoMatched - (s.motoSat||0);
   const avcSpRate = spTotal > 0 ? Math.round(avcTotal / spTotal * 1000) / 10 : 0;
   const mColor    = matchRate>=97?"#22c97b":matchRate>=93?"#f5d433":matchRate>0?"#ff4c6a":"#3a4a6b";
   const asColor   = (avcSpRate>=95&&avcSpRate<=105)?"#22c97b"
@@ -66,6 +323,23 @@ function LaneCard({ lane, stats, onClick }) {
         <span style={{...dashStyles.badge,background:"rgba(91,156,246,0.12)",color:"#5b9cf6"}}>◎ {(s.satOnly||0).toLocaleString()}</span>
         <span style={{...dashStyles.badge,background:"rgba(245,212,51,0.12)",color:"#f5d433"}}>⚠ {(s.axleErr||0).toLocaleString()}</span>
       </div>
+      {/* Elusión de motos — normal en estos carriles, por eso va aparte */}
+      {hayMotos && (
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                     background:"rgba(255,126,63,0.07)",border:"1px solid rgba(255,126,63,0.18)",
+                     borderRadius:7,padding:"6px 9px",marginBottom:10}}
+          title={`${motoSin} de ${motoAvc} motos detectadas por AVC no generaron cobro SP. `
+                +`La elusión de motos es habitual en estos carriles, por eso se reporta aparte `
+                +`y queda excluida de la tasa de detección y del ratio AVC/SP.`}>
+          <span style={{fontSize:10,color:"#a0784f"}}>Elusión motos</span>
+          <span style={{fontSize:12,fontWeight:800,color:"#ff7e3f"}}>
+            {s.motoRate!=null?`${s.motoRate}%`:"—"}
+            <span style={{fontSize:9,fontWeight:600,color:"#5b6a8a",marginLeft:4}}>
+              {motoSin}/{motoAvc}
+            </span>
+          </span>
+        </div>
+      )}
       {/* Total + sparkline */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:12}}>
         <div>
@@ -77,23 +351,32 @@ function LaneCard({ lane, stats, onClick }) {
       {/* Dual metric footer */}
       <div style={{display:"flex",borderTop:"1px solid #1c2b46",paddingTop:10}}>
         <div style={{flex:1,textAlign:"center",paddingRight:10,borderRight:"1px solid #1c2b46"}}
-          title="Tasa de detección: fracción de todos los eventos que cuentan con detección AVC">
+          title={"Tasa de detección: fracción de todos los eventos que cuentan con detección AVC."
+                + (hayMotos ? " Excluye las motos, cuya elusión es habitual y distorsionaría la métrica." : "")}>
           <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.5px",lineHeight:1,color:mColor}}>
             {matchRate>0?`${matchRate}%`:"—"}
           </div>
           <div style={{fontSize:9,color:"#5b6a8a",textTransform:"uppercase",letterSpacing:"0.7px",marginTop:5}}>
-            Detección
+            Detección{hayMotos && <span style={{textTransform:"none"}}> s/motos</span>}
           </div>
         </div>
         <div style={{flex:1,textAlign:"center",paddingLeft:10}}
-          title="Ratio AVC/SP: eventos detectados por AVC respecto a transacciones registradas por SP. >100% indica sobre-detección AVC.">
+          title={"Ratio AVC/SP: eventos detectados por AVC respecto a transacciones registradas por SP."
+                + " >100% indica sobre-detección AVC."
+                + (hayMotos ? " Excluye las motos por el mismo motivo que la tasa de detección." : "")}>
           <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.5px",lineHeight:1,color:asColor}}>
             {avcSpRate>0?`${avcSpRate}%`:"—"}
           </div>
           <div style={{fontSize:9,color:"#5b6a8a",textTransform:"uppercase",letterSpacing:"0.7px",marginTop:5}}>
-            AVC / SP
+            AVC / SP{hayMotos && <span style={{textTransform:"none"}}> s/motos</span>}
           </div>
         </div>
+      </div>
+      <DeltaT off={offset}/>
+      <div onClick={e=>{e.stopPropagation(); onDeepDelta && onDeepDelta();}}
+        style={{marginTop:8,textAlign:"center",fontSize:10,color:"#4d7fe0",cursor:"pointer"}}
+        title="Por qué el Δt de este carril es el que es, y qué efecto tiene en la conciliación">
+        Análisis profundo de Δt →
       </div>
     </div>
   );
@@ -280,6 +563,19 @@ function Dashboard({ onOpenLane, user }) {
       .catch(()=>{});
   },[]);
 
+  // Δt por carril — vigilancia de deriva de reloj SP↔AVC
+  const [offsets,  setOffsets]  = React.useState({});
+  const [deepLane, setDeepLane] = React.useState(null);  // carril con panel de análisis abierto
+  React.useEffect(()=>{
+    window.API.get("/api/lane-offsets?days=30")
+      .then(d=>{
+        const map = {};
+        (d&&d.lanes||[]).forEach(l=>{ map[l.lane] = {...l, window_s:d.window_s}; });
+        setOffsets(map);
+      })
+      .catch(()=>{});
+  },[date]);
+
   // fetchData — carga carriles desde SQLite local (sin spinner si silent=true)
   function fetchData(d, silent) {
     if (refreshInProgressRef.current && silent) return Promise.resolve(null);
@@ -348,7 +644,8 @@ function Dashboard({ onOpenLane, user }) {
         const satLane = resolveSatLane(laneId, satLanes, mapping);
         if (!satLane) { next(); return; }
 
-        window.API.post("/api/reconcile",{avc_lane:laneId,sat_lane:satLane,date:d,window_s:120})
+        // Sin window_s: la ventana la deriva el backend del Δt del carril.
+        window.API.post("/api/reconcile",{avc_lane:laneId,sat_lane:satLane,date:d})
           .then(()=>{})
           .catch(()=>{})
           .finally(()=>{ done += 1; next(); });
@@ -599,6 +896,8 @@ function Dashboard({ onOpenLane, user }) {
         {configs.map(lane=>(
           <LaneCard key={lane.id} lane={lane}
             stats={stats[lane.id]||{total:0,matched:0,avcOnly:0,satOnly:0,axleErr:0,matchRate:0,spark:[0]}}
+            offset={offsets[lane.id]}
+            onDeepDelta={()=>setDeepLane(lane.id)}
             onClick={()=>onOpenLane(lane.id, null, date)}/>
         ))}
         {configs.length===0 && !loading && (
@@ -620,6 +919,9 @@ function Dashboard({ onOpenLane, user }) {
 
       <SummaryChart lanes={configs} stats={stats}/>
       <ClassBreakdown date={date} onOpenLane={onOpenLane}/>
+      {deepLane && (
+        <DeepDeltaPanel lane={deepLane} date={date} onClose={()=>setDeepLane(null)}/>
+      )}
     </div>
   );
 }

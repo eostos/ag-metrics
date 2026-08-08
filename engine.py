@@ -590,7 +590,7 @@ def detect_col(cols, patterns, exclude=None):
 
 
 def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
-                  ventana, after_tol):
+                  ventana, after_tol, offset_s: int = 0):
     """
     Alineación de secuencias SP<->AVC por programación dinámica (Needleman-Wunsch).
 
@@ -602,8 +602,13 @@ def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
       - Monotonicidad: los matches no se cruzan en el tiempo (ambas listas
         deben venir ordenadas ascendentemente por hora).
     Objetivo lexicográfico: (1) maximizar nº de matches válidos, luego
-    (2) minimizar la suma de |delta| (desempate por proximidad). La cardinalidad
-    domina, por eso no hace falta configurar target_delta por carril.
+    (2) minimizar la suma de |delta + offset_s| (desempate por proximidad).
+
+    `offset_s` es el desfase propio del carril: los segundos que el SP precede
+    al AVC. El desempate mide la distancia a ESE valor, no a cero, porque en un
+    carril con desfase de 133s el par correcto está a 133s y el que aparece
+    pegado en el tiempo es el del vehículo anterior. Con offset_s=0 el
+    comportamiento es idéntico al histórico.
 
     Devuelve dict {indice_avc: indice_sat} con la asignación óptima.
     Memoria O(n*m) en un bytearray de retroceso; valores en filas rodantes.
@@ -638,7 +643,8 @@ def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
                is_class_compatible(ai_cls, sat_cls[jj], sat_tab[jj]):
                 delta = sat_ts[jj] - ai_ts
                 if -ventana <= delta <= after_tol:
-                    cand = prev[j - 1] + BIG - abs(delta)
+                    # distancia al desfase esperado del carril, no a cero
+                    cand = prev[j - 1] + BIG - abs(delta + offset_s)
                     if cand > best:
                         best = cand; b = 0
             cur[j] = best
@@ -657,6 +663,72 @@ def align_avc_sat(avc_ts, avc_cls, sat_ts, sat_cls, sat_tab, excluded,
         else:
             j -= 1
     return assign
+
+
+# Cuánto se mira MÁS ALLÁ de la ventana, sólo para diagnosticar. Si aparece un
+# SP de clase compatible ahí fuera, el no-match es por ventana corta y no por
+# clase, y conviene decirlo con esas palabras.
+_VENTANA_DIAGNOSTICO = 180
+
+
+def estimar_offset(avc_ts, sat_ts, lag_min: int = 0, lag_max: int = 300,
+                   tol: int = 1, with_curve: bool = False) -> Optional[Dict]:
+    """
+    Estima el desfase temporal SP->AVC de un carril por correlacion cruzada.
+
+    Desliza la serie SP sobre la AVC y cuenta coincidencias: el desplazamiento
+    que mas produce es el desfase del carril. No necesita saber que SP va con
+    que AVC, asi que no depende de reconcile() ni de la compatibilidad de
+    clase. Sirve para vigilar la deriva de reloj entre el sistema SP y los
+    equipos AVC; NO interviene en la conciliacion.
+
+    avc_ts / sat_ts: listas de timestamps en segundos epoch.
+
+    Devuelve None si la muestra es insuficiente. Si no:
+      offset_s   desfase en segundos (el SP ocurre antes que el AVC)
+      peak       nº de eventos AVC con un SP a esa distancia
+      coverage   peak como % de los eventos AVC
+      sharpness  peak dividido por el mejor pico a mas de 10s de distancia.
+                 El fondo no es cero porque con trafico denso cualquier
+                 desplazamiento acierta algunas por azar; por debajo de ~2.5
+                 el pico no destaca de ese ruido y no debe darse por bueno.
+    """
+    if len(avc_ts) < 15 or len(sat_ts) < 15:
+        return None
+
+    sat_set = {int(t) for t in sat_ts}
+    avc_int = [int(t) for t in avc_ts]
+    ventana_tol = range(-tol, tol + 1)
+
+    curva = []
+    for lag in range(lag_min, lag_max + 1):
+        hits = 0
+        for t in avc_int:
+            base = t - lag
+            for o in ventana_tol:
+                if base + o in sat_set:
+                    hits += 1
+                    break
+        curva.append((lag, hits))
+
+    lag, peak = max(curva, key=lambda x: x[1])
+    if peak <= 0:
+        return None
+
+    lejos = [h for l, h in curva if abs(l - lag) > 10]
+    fondo = max(lejos) if lejos else 0
+    out = {
+        "offset_s": lag,
+        "peak": peak,
+        "coverage": round(100.0 * peak / len(avc_int), 1),
+        "sharpness": round(peak / fondo, 2) if fondo else None,
+        "background": fondo,
+        "n_avc": len(avc_int),
+        "n_sat": len(sat_set),
+    }
+    if with_curve:
+        out["curve"] = [{"lag": l, "hits": h} for l, h in curva]
+    return out
 
 
 def reconcile(
@@ -678,6 +750,7 @@ def reconcile(
     col_sat_num: str,
     col_sat_prix: str,
     progress_callback=None,
+    offset_s: int = 0,
 ) -> pd.DataFrame:
     avc_df = avc_df.copy()
     sat_df = sat_df.copy()
@@ -770,7 +843,7 @@ def reconcile(
     ]
     avc_assign = align_avc_sat(
         avc_ts_all, avc_cls_all, sat_ts_s, sat_cls_pre, sat_tab_pre,
-        excluded_sat, ventana, _SAT_AFTER_TOLERANCE,
+        excluded_sat, ventana, _SAT_AFTER_TOLERANCE, offset_s,
     )
 
     for i in range(n_avc):
@@ -861,15 +934,34 @@ def reconcile(
                 }
             )
         else:
+            # ¿Existe un SP de clase compatible justo FUERA de la ventana? Si lo
+            # hay, el problema es de ventana y no de clasificación: decir
+            # "clase_distinta" mandaría al auditor a investigar un error de
+            # clase que no existe.
+            fuera = None
+            if avc_cls not in (0, 15):
+                lo_x = bisect_left(sat_ts_s, ts_avc_s - ventana - _VENTANA_DIAGNOSTICO)
+                hi_x = bisect_right(sat_ts_s, ts_avc_s + _SAT_AFTER_TOLERANCE + _VENTANA_DIAGNOSTICO)
+                for j in list(range(lo_x, lo)) + list(range(hi, hi_x)):
+                    if j in used_sat or j in excluded_sat:
+                        continue
+                    if is_class_compatible(avc_cls, sat_cls_pre[j], sat_tab_pre[j]):
+                        d = sat_ts_s[j] - ts_avc_s
+                        if fuera is None or abs(d) < abs(fuera[1]):
+                            fuera = (j, d)
+
             motivo = (
                 "error_conteo_avc" if avc_cls == 0
                 else "moto_detectada_solo_por_avc" if avc_cls == 15
+                else "SP_compatible_fuera_de_ventana" if fuera
                 else "clase_distinta" if cands
                 else "SAT_no_detecto"
             )
             obs = (
                 "AVC sin ejes validos - error de conteo" if avc_cls == 0
                 else "Motocicleta AVC - sin SAT correspondiente" if avc_cls == 15
+                else (f"Hay SP de clase compatible a {abs(round(fuera[1]))}s, fuera de la "
+                      f"ventana de {ventana}s - revisar el Dt del carril") if fuera
                 else f"SAT en ventana pero clase incompatible - AVC:{avc_cls}" if cands
                 else f"Sin eventos SAT en ventana +- {ventana}s"
             )
